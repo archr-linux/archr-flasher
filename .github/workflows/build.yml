@@ -52,9 +52,9 @@ jobs:
             libglib2.0-dev \
             libgtk-3-dev
 
-      # macOS: import signing certificate from GitHub Secrets
+      # macOS: import signing certificate from GitHub Secrets (skip if not configured)
       - name: Import Apple certificate
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -92,7 +92,9 @@ jobs:
           includeUpdaterJson: true
           args: ${{ matrix.args }}
 
-      # macOS: cleanup keychain
+      # macOS: cleanup keychain (only if certificate was imported)
       - name: Cleanup keychain
-        if: runner.os == 'macOS' && always()
+        if: runner.os == 'macOS' && always() && env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
         run: security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true

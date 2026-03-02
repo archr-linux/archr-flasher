@@ -10,7 +10,6 @@
     "beforeBuildCommand": ""
   },
   "app": {
-    "title": "Arch R Flasher",
     "windows": [
       {
         "title": "Arch R Flasher",
