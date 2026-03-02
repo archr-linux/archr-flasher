@@ -251,14 +251,18 @@ PANEL_ID="$4"
 VARIANT="$5"
 PROGRESS_FILE="$6"
 
-# Unmount all partitions on the device before writing
+# RPi Imager technique: escalating unmount strategy
+# Try normal umount first, then lazy (MNT_DETACH), then force (MNT_FORCE)
 for part in "${DEVICE}"*; do
-    umount "$part" 2>/dev/null || true
+    [ -b "$part" ] || continue
+    umount "$part" 2>/dev/null \
+        || umount -l "$part" 2>/dev/null \
+        || umount -f "$part" 2>/dev/null \
+        || true
 done
 
-# Write raw image to device with progress tracking
-IMAGE_SIZE=$(stat -c%s "$IMAGE")
-dd if="$IMAGE" of="$DEVICE" bs=4M conv=fsync status=none &
+# Write raw image with O_DIRECT (bypasses page cache, like RPi Imager)
+dd if="$IMAGE" of="$DEVICE" bs=4M oflag=direct conv=fsync status=none &
 DD_PID=$!
 
 # Monitor dd progress via /proc/fdinfo
@@ -351,8 +355,9 @@ pub fn flash_image_privileged(
         .map(|m| m.len()).unwrap_or(0);
 
     // Step 2: Unmount disk (macOS auto-mounts SD cards)
+    // RPi Imager technique: force unmount (kDADiskUnmountOptionForce equivalent)
     let _ = Command::new("diskutil")
-        .args(["unmountDisk", device])
+        .args(["unmountDisk", "force", device])
         .status();
 
     // Step 3: Write helper script
@@ -434,8 +439,8 @@ PANEL_ID="$4"
 VARIANT="$5"
 PROGRESS_FILE="$6"
 
-# Unmount all partitions (in case auto-mounted again)
-diskutil unmountDisk "$DEVICE" 2>/dev/null || true
+# RPi Imager technique: force unmount (kDADiskUnmountOptionForce equivalent)
+diskutil unmountDisk force "$DEVICE" 2>/dev/null || true
 
 # Write raw image to device (macOS uses rdisk for raw access = faster)
 RDISK=$(echo "$DEVICE" | sed 's|/dev/disk|/dev/rdisk|')
