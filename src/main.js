@@ -363,11 +363,19 @@ function translateError(msg) {
   const patterns = [
     [/cancelled|canceled/i, 'flash_cancelled'],
     [/not enough temp space/i, 'error_no_space'],
-    [/device not found|removed/i, 'error_device_removed'],
+    [/device not found|was the sd card removed/i, 'error_device_removed'],
     [/not a removable/i, 'error_not_removable'],
     [/no.*image.*found/i, 'error_no_image'],
     [/network|dns|connect|timeout/i, 'error_network'],
     [/checksum.*fail/i, 'error_checksum_failed'],
+    [/failed to run pkexec|osascript error|failed to run powershell/i, 'error_privilege'],
+    [/not authorized|dismissed/i, 'error_privilege'],
+    [/decompress error|xzdecoder/i, 'error_decompress'],
+    [/write error|flush error/i, 'error_write_failed'],
+    [/cannot open image/i, 'error_open_image'],
+    [/cannot write helper|cannot set script|cannot write params|cannot create temp/i, 'error_prepare_flash'],
+    [/flash failed/i, 'error_flash_failed'],
+    [/invalid device|invalid disk/i, 'error_invalid_device'],
   ];
   for (const [regex, key] of patterns) {
     if (regex.test(msg)) return t(key);
