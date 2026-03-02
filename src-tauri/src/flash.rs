@@ -261,9 +261,16 @@ for part in "${DEVICE}"*; do
         || true
 done
 
-# Write raw image with O_DIRECT (bypasses page cache, like RPi Imager)
-dd if="$IMAGE" of="$DEVICE" bs=4M oflag=direct conv=fsync status=none &
+# Write raw image — try O_DIRECT first (bypasses page cache, like RPi Imager),
+# fall back to normal write if device doesn't support it (EINVAL on some readers)
+dd if="$IMAGE" of="$DEVICE" bs=4M oflag=direct conv=fsync status=none 2>/dev/null &
 DD_PID=$!
+sleep 1
+if ! kill -0 $DD_PID 2>/dev/null; then
+    # dd with O_DIRECT exited immediately — retry without it
+    dd if="$IMAGE" of="$DEVICE" bs=4M conv=fsync status=none &
+    DD_PID=$!
+fi
 
 # Monitor dd progress via /proc/fdinfo
 while kill -0 $DD_PID 2>/dev/null; do
