@@ -12,6 +12,12 @@ node_modules/
 .DS_Store
 Thumbs.db
 
+# Secrets (NEVER commit these)
+build-mac.sh
+*.p12
+*.pem
+*.key
+
 # IDE
 .vscode/
 .idea/
