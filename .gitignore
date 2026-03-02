@@ -7,7 +7,6 @@ node_modules/
 
 # Tauri
 /src-tauri/WixTools/
-/src-tauri/icons/
 
 # OS
 .DS_Store

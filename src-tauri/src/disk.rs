@@ -23,6 +23,7 @@ fn format_size(bytes: u64) -> String {
 #[cfg(target_os = "linux")]
 pub fn list_removable_disks() -> Vec<DiskInfo> {
     let mut disks = Vec::new();
+    let system_disks = get_system_disk_names();
 
     let block_dir = Path::new("/sys/block");
     let entries = match fs::read_dir(block_dir) {
@@ -35,6 +36,11 @@ pub fn list_removable_disks() -> Vec<DiskInfo> {
 
         // Only sd* and mmcblk* devices
         if !name.starts_with("sd") && !name.starts_with("mmcblk") {
+            continue;
+        }
+
+        // Never list system disk (where / is mounted)
+        if system_disks.iter().any(|sd| name == *sd) {
             continue;
         }
 
@@ -81,6 +87,55 @@ pub fn list_removable_disks() -> Vec<DiskInfo> {
     }
 
     disks
+}
+
+/// Read /proc/mounts to find which block devices back /, /home, /boot.
+/// Returns the parent disk names (e.g. "sda" from "/dev/sda1", "nvme0n1" from "/dev/nvme0n1p2").
+#[cfg(target_os = "linux")]
+fn get_system_disk_names() -> Vec<String> {
+    let mut names = Vec::new();
+    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
+
+    for line in mounts.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 { continue; }
+
+        let mount_point = parts[1];
+        // Only protect critical mount points
+        if mount_point != "/" && mount_point != "/home" && mount_point != "/boot" {
+            continue;
+        }
+
+        let dev = parts[0];
+        if !dev.starts_with("/dev/") { continue; }
+        let dev_name = &dev[5..]; // strip "/dev/"
+
+        // Strip partition number to get parent disk name
+        // "sda1" → "sda", "nvme0n1p2" → "nvme0n1", "mmcblk0p1" → "mmcblk0"
+        let parent = strip_partition_suffix(dev_name);
+        if !parent.is_empty() && !names.contains(&parent) {
+            names.push(parent);
+        }
+    }
+
+    names
+}
+
+/// Strip partition suffix: "sda1" → "sda", "nvme0n1p2" → "nvme0n1", "mmcblk0p1" → "mmcblk0"
+#[cfg(target_os = "linux")]
+fn strip_partition_suffix(dev: &str) -> String {
+    if dev.contains("nvme") || dev.contains("mmcblk") {
+        // These use "p" + number suffix: nvme0n1p2 → nvme0n1, mmcblk0p1 → mmcblk0
+        if let Some(idx) = dev.rfind('p') {
+            if dev[idx + 1..].chars().all(|c| c.is_ascii_digit()) && !dev[idx + 1..].is_empty() {
+                return dev[..idx].to_string();
+            }
+        }
+        dev.to_string()
+    } else {
+        // sd* devices: sda1 → sda (strip trailing digits)
+        dev.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()
+    }
 }
 
 #[cfg(target_os = "macos")]
