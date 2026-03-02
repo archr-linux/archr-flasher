@@ -25,8 +25,12 @@
   "writing": "Gravando imagem...",
   "syncing": "Sincronizando...",
   "configuring": "Configurando painel...",
+  "decompressing": "Descompactando imagem...",
+  "downloading": "Baixando...",
+  "download_complete": "Download concluido!",
+  "cached": "Usando imagem do cache.",
+  "flash_cancelled": "Gravacao cancelada.",
   "done": "SD card pronto! Insira no R36S e ligue.",
   "error_select_file": "Erro ao selecionar arquivo: ",
-  "checking_version": "Verificando ultima versao...",
-  "available": "Disponivel: {name}. Abrindo navegador para download."
+  "checking_version": "Verificando ultima versao..."
 }

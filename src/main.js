@@ -10,11 +10,9 @@ const SUPPORTED_LOCALES = ['en', 'pt-BR'];
 async function initI18n() {
   try {
     const osLocale = await window.__TAURI__.core.invoke('get_locale');
-    // Match: "pt-BR" → "pt-BR", "pt_BR" → "pt-BR", "pt" → "pt-BR", "en-US" → "en"
     const normalized = osLocale.replace('_', '-');
     let locale = SUPPORTED_LOCALES.find(l => normalized.startsWith(l));
     if (!locale) {
-      // Try matching just the language part (e.g. "pt" from "pt-PT")
       const langPart = normalized.split('-')[0];
       locale = SUPPORTED_LOCALES.find(l => l.startsWith(langPart)) || 'en';
     }
@@ -22,7 +20,6 @@ async function initI18n() {
     const resp = await fetch(`../assets/i18n/${locale}.json`);
     lang = await resp.json();
   } catch (e) {
-    // Fallback: load English
     try {
       const resp = await fetch('../assets/i18n/en.json');
       lang = await resp.json();
@@ -62,6 +59,7 @@ let selectedConsole = null;
 let selectedPanel = null;
 let selectedDisk = null;
 let imagePath = null;
+let busy = false;
 
 // ---------------------------------------------------------------------------
 // DOM
@@ -86,9 +84,23 @@ const confirmDialog = $('confirm-dialog');
 const confirmText = $('confirm-text');
 
 // ---------------------------------------------------------------------------
+// Busy state — disables all controls during operations
+// ---------------------------------------------------------------------------
+function setBusy(isBusy) {
+  busy = isBusy;
+  const controls = [
+    btnOriginal, btnClone, panelSelect, diskSelect,
+    $('btn-select-file'), $('btn-download'), $('btn-refresh-disks'),
+  ];
+  controls.forEach(el => { if (el) el.disabled = isBusy; });
+  updateFlashButton();
+}
+
+// ---------------------------------------------------------------------------
 // Console selection
 // ---------------------------------------------------------------------------
 function selectConsole(console) {
+  if (busy) return;
   selectedConsole = console;
   selectedPanel = null;
 
@@ -187,13 +199,14 @@ $('btn-refresh-disks').addEventListener('click', refreshDisks);
 // Flash button state
 // ---------------------------------------------------------------------------
 function updateFlashButton() {
-  btnFlash.disabled = !(imagePath && selectedConsole && selectedPanel && selectedDisk);
+  btnFlash.disabled = busy || !(imagePath && selectedConsole && selectedPanel && selectedDisk);
 }
 
 // ---------------------------------------------------------------------------
-// File selection
+// File selection (local file picker)
 // ---------------------------------------------------------------------------
 $('btn-select-file').addEventListener('click', async () => {
+  if (busy) return;
   try {
     const selected = await window.__TAURI__.dialog.open({
       filters: [{
@@ -208,6 +221,7 @@ $('btn-select-file').addEventListener('click', async () => {
       imageNameEl.textContent = fileName;
       imageNameEl.removeAttribute('data-i18n');
       imageNameEl.style.color = 'var(--text)';
+      imageVersionEl.textContent = '';
       updateFlashButton();
     }
   } catch (e) {
@@ -216,24 +230,65 @@ $('btn-select-file').addEventListener('click', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Download latest
+// Download latest (in-app download with progress)
 // ---------------------------------------------------------------------------
 $('btn-download').addEventListener('click', async () => {
+  if (busy) return;
+  setBusy(true);
+  progressSection.style.display = '';
+  progressFill.style.width = '0%';
+  progressPercent.textContent = '0%';
+  progressStage.textContent = t('checking_version');
   setStatus(t('checking_version'), '');
+
   try {
-    const release = await window.__TAURI__.core.invoke('check_latest_release');
-    imageVersionEl.textContent = release.version;
-    setStatus(t('available', { name: release.image_name }), '');
-    await window.__TAURI__.shell.open(release.download_url);
+    const result = await window.__TAURI__.core.invoke('download_image');
+
+    imagePath = result.path;
+    imageNameEl.textContent = result.image_name;
+    imageNameEl.removeAttribute('data-i18n');
+    imageNameEl.style.color = 'var(--text)';
+    imageVersionEl.textContent = result.version;
+
+    if (result.cached) {
+      setStatus(t('cached'), 'success');
+    } else {
+      setStatus(t('download_complete'), 'success');
+    }
+
+    progressFill.style.width = '100%';
+    progressPercent.textContent = '100%';
+    progressStage.textContent = '';
+
+    // Hide progress after a moment
+    setTimeout(() => {
+      if (!busy) progressSection.style.display = 'none';
+    }, 2000);
   } catch (e) {
     setStatus('Error: ' + e, 'error');
+    progressSection.style.display = 'none';
   }
+
+  setBusy(false);
+  updateFlashButton();
+});
+
+// Download progress listener
+window.__TAURI__.event.listen('download-progress', (event) => {
+  const { percent, downloaded_bytes, total_bytes } = event.payload;
+  progressFill.style.width = percent.toFixed(1) + '%';
+  progressPercent.textContent = percent.toFixed(0) + '%';
+
+  const dl = formatBytes(downloaded_bytes);
+  const tot = formatBytes(total_bytes);
+  progressStage.textContent = `${t('downloading')} ${dl} / ${tot}`;
 });
 
 // ---------------------------------------------------------------------------
 // Flash
 // ---------------------------------------------------------------------------
 $('btn-flash').addEventListener('click', () => {
+  if (busy) return;
   const diskName = diskSelect.options[diskSelect.selectedIndex].textContent;
   confirmText.textContent = t('confirm_text', { disk: diskName });
   confirmDialog.style.display = '';
@@ -249,8 +304,11 @@ $('btn-confirm').addEventListener('click', async () => {
 });
 
 async function startFlash() {
-  btnFlash.disabled = true;
+  setBusy(true);
   progressSection.style.display = '';
+  progressFill.style.width = '0%';
+  progressPercent.textContent = '0%';
+  progressStage.textContent = t('writing');
   setStatus(t('writing'), '');
 
   try {
@@ -264,17 +322,21 @@ async function startFlash() {
 
     progressFill.style.width = '100%';
     progressPercent.textContent = '100%';
+    progressStage.textContent = '';
     setStatus(t('done'), 'success');
   } catch (e) {
-    setStatus('Error: ' + e, 'error');
+    if (e === 'cancelled') {
+      setStatus(t('flash_cancelled'), '');
+      progressSection.style.display = 'none';
+    } else {
+      setStatus('Error: ' + e, 'error');
+    }
   }
 
-  btnFlash.disabled = false;
+  setBusy(false);
 }
 
-// ---------------------------------------------------------------------------
-// Progress listener
-// ---------------------------------------------------------------------------
+// Flash progress listener
 window.__TAURI__.event.listen('flash-progress', (event) => {
   const { percent, stage } = event.payload;
   progressFill.style.width = percent.toFixed(1) + '%';
@@ -283,11 +345,17 @@ window.__TAURI__.event.listen('flash-progress', (event) => {
 });
 
 // ---------------------------------------------------------------------------
-// Status helper
+// Helpers
 // ---------------------------------------------------------------------------
 function setStatus(text, type) {
   statusEl.textContent = text;
   statusEl.className = 'status' + (type ? ' ' + type : '');
+}
+
+function formatBytes(bytes) {
+  if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + ' GB';
+  if (bytes >= 1e6) return (bytes / 1e6).toFixed(0) + ' MB';
+  return bytes + ' B';
 }
 
 // ---------------------------------------------------------------------------

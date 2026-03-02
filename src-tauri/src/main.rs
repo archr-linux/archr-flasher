@@ -7,8 +7,9 @@ mod github;
 mod panels;
 
 use disk::DiskInfo;
+use github::{DownloadResult, ReleaseInfo};
 use panels::Panel;
-use github::ReleaseInfo;
+use tauri::Manager;
 
 /// Returns the OS locale (e.g. "pt-BR", "en-US") for i18n.
 #[tauri::command]
@@ -31,6 +32,25 @@ async fn check_latest_release() -> Result<ReleaseInfo, String> {
     github::get_latest_release().await
 }
 
+/// Download the latest image to local cache (or return cached path).
+#[tauri::command]
+async fn download_image(app: tauri::AppHandle) -> Result<DownloadResult, String> {
+    let release = github::get_latest_release().await?;
+
+    let cache_dir = app.path().app_cache_dir()
+        .map_err(|e| format!("Cache dir error: {}", e))?;
+
+    let (path, cached) = github::download_image(&app, &release, &cache_dir).await?;
+
+    Ok(DownloadResult {
+        path: path.to_string_lossy().to_string(),
+        version: release.version,
+        image_name: release.image_name,
+        cached,
+    })
+}
+
+/// Flash image to SD card with privilege escalation.
 #[tauri::command]
 async fn flash_image(
     app: tauri::AppHandle,
@@ -40,21 +60,17 @@ async fn flash_image(
     panel_id: String,
     variant: String,
 ) -> Result<String, String> {
-    // Stage 1: Write image to SD card
     let app_clone = app.clone();
-    let device_clone = device.clone();
-    let image_path_clone = image_path.clone();
 
     tokio::task::spawn_blocking(move || {
-        flash::write_image(&app_clone, &image_path_clone, &device_clone)
-    })
-    .await
-    .map_err(|e| format!("Task error: {}", e))??;
-
-    // Stage 2: Post-flash configuration (inject DTB, panel.txt, variant)
-    let device_clone = device.clone();
-    tokio::task::spawn_blocking(move || {
-        flash::post_flash_configure(&device_clone, &panel_dtb, &panel_id, &variant)
+        flash::flash_image_privileged(
+            &app_clone,
+            &image_path,
+            &device,
+            &panel_dtb,
+            &panel_id,
+            &variant,
+        )
     })
     .await
     .map_err(|e| format!("Task error: {}", e))??;
@@ -71,6 +87,7 @@ fn main() {
             get_panels,
             list_disks,
             check_latest_release,
+            download_image,
             flash_image,
         ])
         .run(tauri::generate_context!())

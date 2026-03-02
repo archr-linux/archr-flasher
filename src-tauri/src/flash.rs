@@ -1,237 +1,194 @@
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write, Seek, SeekFrom};
+use std::io::{BufReader, Read, Write};
+use std::fs::{self, File};
 use std::path::Path;
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
 
-const BLOCK_SIZE: usize = 4 * 1024 * 1024; // 4MB
-
 #[derive(Debug, Clone, Serialize)]
-pub struct FlashProgress {
-    pub bytes_written: u64,
-    pub total_bytes: u64,
-    pub percent: f64,
-    pub stage: String,
+struct FlashProgress {
+    percent: f64,
+    stage: String,
 }
 
-/// Write raw image to block device, emitting progress events.
-pub fn write_image(app: &AppHandle, image_path: &str, device: &str) -> Result<(), String> {
-    let img_path = Path::new(image_path);
-
-    // Determine if we need xz decompression
-    let is_xz = image_path.ends_with(".xz");
-
-    let total_bytes = if is_xz {
-        // For .xz files, estimate decompressed size (actual size unknown until decompressed)
-        // Use the compressed size * 3 as rough estimate
-        let meta = fs::metadata(img_path).map_err(|e| format!("Cannot read image: {}", e))?;
-        meta.len() * 3
-    } else {
-        let meta = fs::metadata(img_path).map_err(|e| format!("Cannot read image: {}", e))?;
-        meta.len()
-    };
-
-    // Open source
-    let source_file = File::open(img_path).map_err(|e| format!("Cannot open image: {}", e))?;
-
-    let mut reader: Box<dyn Read> = if is_xz {
-        Box::new(xz2::read::XzDecoder::new(source_file))
-    } else {
-        Box::new(source_file)
-    };
-
-    // Open target device for raw writing
-    let mut target = OpenOptions::new()
-        .write(true)
-        .open(device)
-        .map_err(|e| format!("Cannot open device {}: {}", device, e))?;
-
-    let mut buffer = vec![0u8; BLOCK_SIZE];
-    let mut bytes_written: u64 = 0;
-
-    loop {
-        let bytes_read = reader.read(&mut buffer).map_err(|e| format!("Read error: {}", e))?;
-        if bytes_read == 0 {
-            break;
-        }
-
-        target.write_all(&buffer[..bytes_read]).map_err(|e| format!("Write error: {}", e))?;
-        bytes_written += bytes_read as u64;
-
-        let percent = (bytes_written as f64 / total_bytes as f64 * 100.0).min(100.0);
-
-        let _ = app.emit("flash-progress", FlashProgress {
-            bytes_written,
-            total_bytes,
-            percent,
-            stage: "writing".into(),
-        });
-    }
-
-    // Sync
-    target.flush().map_err(|e| format!("Flush error: {}", e))?;
-
+fn emit_progress(app: &AppHandle, percent: f64, stage: &str) {
     let _ = app.emit("flash-progress", FlashProgress {
-        bytes_written,
-        total_bytes: bytes_written,
-        percent: 100.0,
-        stage: "syncing".into(),
+        percent,
+        stage: stage.to_string(),
     });
-
-    Ok(())
 }
 
-/// After writing the image, inject panel configuration into the BOOT partition (FAT32).
-/// Reads the partition table to find partition 1 offset, then uses fatfs crate to
-/// manipulate files directly on the block device without OS-level mounting.
-pub fn post_flash_configure(
+// ---------------------------------------------------------------------------
+// Linux: pkexec + helper script
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "linux")]
+pub fn flash_image_privileged(
+    app: &AppHandle,
+    image_path: &str,
     device: &str,
     panel_dtb: &str,
     panel_id: &str,
     variant: &str,
 ) -> Result<(), String> {
-    // Read MBR to find partition 1 offset
-    let mut dev = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(device)
-        .map_err(|e| format!("Cannot open device: {}", e))?;
+    use std::process::Command;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
 
-    let boot_offset = read_partition1_offset(&mut dev)?;
+    let is_xz = image_path.ends_with(".xz");
 
-    // Create a view of the FAT32 partition
-    let partition = PartitionSlice::new(dev, boot_offset)?;
-    let fs = fatfs::FileSystem::new(partition, fatfs::FsOptions::new())
-        .map_err(|e| format!("Cannot open FAT32: {}", e))?;
+    // Step 1: Decompress .xz in user space (with progress)
+    let img_to_flash = if is_xz {
+        emit_progress(app, 0.0, "decompressing");
+        let temp_img = std::env::temp_dir().join("archr-flash-temp.img");
+        decompress_xz(app, image_path, &temp_img)?;
+        temp_img
+    } else {
+        PathBuf::from(image_path)
+    };
 
-    let root = fs.root_dir();
+    // Step 2: Write helper script to temp file
+    let script_path = std::env::temp_dir().join("archr-flash.sh");
+    fs::write(&script_path, FLASH_SCRIPT)
+        .map_err(|e| format!("Cannot write helper script: {}", e))?;
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
+        .map_err(|e| format!("Cannot set script permissions: {}", e))?;
 
-    // 1. Copy panel DTB as kernel.dtb
-    // Read the source DTB from the partition
-    let mut dtb_data = Vec::new();
-    let mut src = root.open_file(panel_dtb)
-        .map_err(|e| format!("Cannot read {}: {}", panel_dtb, e))?;
-    src.read_to_end(&mut dtb_data)
-        .map_err(|e| format!("Read DTB error: {}", e))?;
-    drop(src);
+    // Step 3: Run via pkexec (writes image + configures panel)
+    emit_progress(app, 60.0, "writing");
 
-    // Write as kernel.dtb
-    let mut dst = root.create_file("kernel.dtb")
-        .map_err(|e| format!("Cannot create kernel.dtb: {}", e))?;
-    dst.truncate()
-        .map_err(|e| format!("Truncate error: {}", e))?;
-    dst.write_all(&dtb_data)
-        .map_err(|e| format!("Write kernel.dtb error: {}", e))?;
-    dst.flush()
-        .map_err(|e| format!("Flush error: {}", e))?;
-    drop(dst);
+    let output = Command::new("pkexec")
+        .arg("bash")
+        .arg(&script_path)
+        .arg(img_to_flash.to_str().unwrap_or(""))
+        .arg(device)
+        .arg(panel_dtb)
+        .arg(panel_id)
+        .arg(variant)
+        .output()
+        .map_err(|e| format!("Failed to run pkexec: {}", e))?;
 
-    // 2. Write panel.txt
-    let panel_txt = format!("PanelNum={}\nPanelDTB={}\n", panel_id, panel_dtb);
-    let mut f = root.create_file("panel.txt")
-        .map_err(|e| format!("Cannot create panel.txt: {}", e))?;
-    f.truncate().map_err(|e| format!("Truncate error: {}", e))?;
-    f.write_all(panel_txt.as_bytes())
-        .map_err(|e| format!("Write panel.txt error: {}", e))?;
-    f.flush().map_err(|e| format!("Flush error: {}", e))?;
-    drop(f);
+    // Cleanup temp files
+    let _ = fs::remove_file(&script_path);
+    if is_xz {
+        let _ = fs::remove_file(&img_to_flash);
+    }
 
-    // 3. Write panel-confirmed
-    let mut f = root.create_file("panel-confirmed")
-        .map_err(|e| format!("Cannot create panel-confirmed: {}", e))?;
-    f.truncate().map_err(|e| format!("Truncate error: {}", e))?;
-    f.write_all(b"confirmed\n")
-        .map_err(|e| format!("Write error: {}", e))?;
-    f.flush().map_err(|e| format!("Flush error: {}", e))?;
-    drop(f);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("dismissed") || stderr.contains("Not authorized") {
+            return Err("cancelled".into());
+        }
+        return Err(format!("Flash failed: {}", stderr));
+    }
 
-    // 4. Write variant
-    let mut f = root.create_file("variant")
-        .map_err(|e| format!("Cannot create variant: {}", e))?;
-    f.truncate().map_err(|e| format!("Truncate error: {}", e))?;
-    f.write_all(format!("{}\n", variant).as_bytes())
-        .map_err(|e| format!("Write error: {}", e))?;
-    f.flush().map_err(|e| format!("Flush error: {}", e))?;
+    emit_progress(app, 95.0, "configuring");
+    emit_progress(app, 100.0, "done");
 
     Ok(())
 }
 
-/// Read MBR partition table to find byte offset of partition 1.
-fn read_partition1_offset(dev: &mut File) -> Result<u64, String> {
-    let mut mbr = [0u8; 512];
-    dev.seek(SeekFrom::Start(0))
-        .map_err(|e| format!("Seek error: {}", e))?;
-    dev.read_exact(&mut mbr)
-        .map_err(|e| format!("Read MBR error: {}", e))?;
+#[cfg(target_os = "linux")]
+fn decompress_xz(app: &AppHandle, src: &str, dst: &Path) -> Result<(), String> {
+    let src_file = File::open(src)
+        .map_err(|e| format!("Cannot open image: {}", e))?;
+    let src_size = src_file.metadata()
+        .map_err(|e| format!("Metadata error: {}", e))?.len();
+    let estimated_total = src_size * 3; // rough estimate for decompressed size
 
-    // Check MBR signature
-    if mbr[510] != 0x55 || mbr[511] != 0xAA {
-        return Err("Invalid MBR signature".into());
+    let mut decoder = xz2::read::XzDecoder::new(BufReader::new(src_file));
+    let mut dst_file = File::create(dst)
+        .map_err(|e| format!("Cannot create temp file: {}", e))?;
+
+    let mut buf = vec![0u8; 4 * 1024 * 1024]; // 4MB buffer
+    let mut written: u64 = 0;
+
+    loop {
+        let n = decoder.read(&mut buf)
+            .map_err(|e| format!("Decompress error: {}", e))?;
+        if n == 0 { break; }
+
+        dst_file.write_all(&buf[..n])
+            .map_err(|e| format!("Write error: {}", e))?;
+        written += n as u64;
+
+        // 0-55% for decompression phase
+        let pct = (written as f64 / estimated_total as f64 * 55.0).min(55.0);
+        emit_progress(app, pct, "decompressing");
     }
 
-    // Partition 1 entry starts at offset 446
-    // LBA start is at bytes 8-11 (little-endian u32)
-    let lba_start = u32::from_le_bytes([mbr[454], mbr[455], mbr[456], mbr[457]]);
-
-    if lba_start == 0 {
-        return Err("Partition 1 not found in MBR".into());
-    }
-
-    Ok(lba_start as u64 * 512)
+    dst_file.flush().map_err(|e| format!("Flush error: {}", e))?;
+    Ok(())
 }
 
-/// A wrapper around File that presents a partition as a seekable Read+Write+Seek.
-struct PartitionSlice {
-    file: File,
-    offset: u64,
-    pos: u64,
+#[cfg(target_os = "linux")]
+const FLASH_SCRIPT: &str = r#"#!/bin/bash
+set -e
+
+IMAGE="$1"
+DEVICE="$2"
+PANEL_DTB="$3"
+PANEL_ID="$4"
+VARIANT="$5"
+
+# Write raw image to device
+dd if="$IMAGE" of="$DEVICE" bs=4M conv=fsync status=none
+sync
+
+# Re-read partition table
+partprobe "$DEVICE" 2>/dev/null || true
+sleep 1
+
+# Determine boot partition device name
+if [[ "$DEVICE" == *mmcblk* ]] || [[ "$DEVICE" == *nvme* ]]; then
+    BOOT_PART="${DEVICE}p1"
+else
+    BOOT_PART="${DEVICE}1"
+fi
+
+# Mount boot partition
+MOUNT_DIR=$(mktemp -d)
+mount "$BOOT_PART" "$MOUNT_DIR"
+
+# Copy selected panel DTB as kernel.dtb
+if [ -f "$MOUNT_DIR/$PANEL_DTB" ]; then
+    cp "$MOUNT_DIR/$PANEL_DTB" "$MOUNT_DIR/kernel.dtb"
+fi
+
+# Write panel configuration
+printf 'PanelNum=%s\nPanelDTB=%s\n' "$PANEL_ID" "$PANEL_DTB" > "$MOUNT_DIR/panel.txt"
+echo "confirmed" > "$MOUNT_DIR/panel-confirmed"
+echo "$VARIANT" > "$MOUNT_DIR/variant"
+
+sync
+umount "$MOUNT_DIR"
+rmdir "$MOUNT_DIR"
+"#;
+
+// ---------------------------------------------------------------------------
+// macOS: privilege escalation via osascript
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "macos")]
+pub fn flash_image_privileged(
+    _app: &AppHandle,
+    _image_path: &str,
+    _device: &str,
+    _panel_dtb: &str,
+    _panel_id: &str,
+    _variant: &str,
+) -> Result<(), String> {
+    Err("macOS flash not yet implemented".into())
 }
 
-impl PartitionSlice {
-    fn new(mut file: File, offset: u64) -> Result<Self, String> {
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| format!("Seek to partition: {}", e))?;
-        Ok(Self { file, offset, pos: 0 })
-    }
-}
-
-impl Read for PartitionSlice {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.file.read(buf)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl Write for PartitionSlice {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.file.write(buf)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.file.flush()
-    }
-}
-
-impl Seek for PartitionSlice {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let new_pos = match pos {
-            SeekFrom::Start(p) => {
-                self.file.seek(SeekFrom::Start(self.offset + p))?;
-                p
-            }
-            SeekFrom::Current(p) => {
-                let abs = self.file.seek(SeekFrom::Current(p))?;
-                abs - self.offset
-            }
-            SeekFrom::End(p) => {
-                let abs = self.file.seek(SeekFrom::End(p))?;
-                abs - self.offset
-            }
-        };
-        self.pos = new_pos;
-        Ok(new_pos)
-    }
+// ---------------------------------------------------------------------------
+// Windows: privilege escalation via UAC
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "windows")]
+pub fn flash_image_privileged(
+    _app: &AppHandle,
+    _image_path: &str,
+    _device: &str,
+    _panel_dtb: &str,
+    _panel_id: &str,
+    _variant: &str,
+) -> Result<(), String> {
+    Err("Windows flash not yet implemented".into())
 }

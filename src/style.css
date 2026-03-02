@@ -355,3 +355,13 @@ header h1 {
 .btn-danger:hover {
   background: var(--danger-light);
 }
+
+/* Disabled state for all interactive elements */
+.console-btn:disabled,
+.btn-secondary:disabled,
+.btn-icon:disabled,
+.select:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}

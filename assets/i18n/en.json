@@ -25,8 +25,12 @@
   "writing": "Writing image...",
   "syncing": "Syncing...",
   "configuring": "Configuring panel...",
+  "decompressing": "Decompressing image...",
+  "downloading": "Downloading...",
+  "download_complete": "Download complete!",
+  "cached": "Using cached image.",
+  "flash_cancelled": "Flash cancelled.",
   "done": "SD card ready! Insert in R36S and power on.",
   "error_select_file": "Error selecting file: ",
-  "checking_version": "Checking latest version...",
-  "available": "Available: {name}. Opening browser to download."
+  "checking_version": "Checking latest version..."
 }
