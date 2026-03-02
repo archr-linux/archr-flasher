@@ -325,12 +325,13 @@ async function startFlash() {
     progressStage.textContent = '';
     setStatus(t('done'), 'success');
   } catch (e) {
-    if (e === 'cancelled') {
+    const msg = typeof e === 'string' ? e : String(e);
+    if (msg === 'cancelled') {
       setStatus(t('flash_cancelled'), '');
-      progressSection.style.display = 'none';
     } else {
-      setStatus(translateError(e), 'error');
+      setStatus(translateError(msg), 'error');
     }
+    progressSection.style.display = 'none';
   }
 
   setBusy(false);

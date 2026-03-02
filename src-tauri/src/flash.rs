@@ -291,9 +291,13 @@ MOUNT_DIR=$(mktemp -d)
 mount "$BOOT_PART" "$MOUNT_DIR"
 
 # Copy selected panel DTB as kernel.dtb
-if [ -f "$MOUNT_DIR/$PANEL_DTB" ]; then
-    cp "$MOUNT_DIR/$PANEL_DTB" "$MOUNT_DIR/kernel.dtb"
+if [ ! -f "$MOUNT_DIR/$PANEL_DTB" ]; then
+    echo "ERROR: Panel DTB $PANEL_DTB not found in image" >&2
+    umount "$MOUNT_DIR" 2>/dev/null || true
+    rmdir "$MOUNT_DIR" 2>/dev/null || true
+    exit 1
 fi
+cp "$MOUNT_DIR/$PANEL_DTB" "$MOUNT_DIR/kernel.dtb"
 
 # Write panel configuration
 printf 'PanelNum=%s\nPanelDTB=%s\n' "$PANEL_ID" "$PANEL_DTB" > "$MOUNT_DIR/panel.txt"
@@ -468,22 +472,26 @@ for i in 1 2 3; do
     BOOT_VOL=""
 done
 
-if [ -n "$BOOT_VOL" ] && [ -d "$BOOT_VOL" ]; then
-    # Copy selected panel DTB as kernel.dtb
-    if [ -f "$BOOT_VOL/$PANEL_DTB" ]; then
-        cp "$BOOT_VOL/$PANEL_DTB" "$BOOT_VOL/kernel.dtb"
-    fi
-
-    # Write panel configuration
-    printf 'PanelNum=%s\nPanelDTB=%s\n' "$PANEL_ID" "$PANEL_DTB" > "$BOOT_VOL/panel.txt"
-    echo "confirmed" > "$BOOT_VOL/panel-confirmed"
-    echo "$VARIANT" > "$BOOT_VOL/variant"
-
-    sync
-else
-    echo "WARNING: Could not mount boot partition to write panel config." >&2
-    echo "Image was written successfully. Panel selection may need to be done on device." >&2
+if [ -z "$BOOT_VOL" ] || [ ! -d "$BOOT_VOL" ]; then
+    echo "ERROR: Could not mount boot partition to configure panel" >&2
+    diskutil eject "$DEVICE" 2>/dev/null || true
+    exit 1
 fi
+
+# Copy selected panel DTB as kernel.dtb
+if [ ! -f "$BOOT_VOL/$PANEL_DTB" ]; then
+    echo "ERROR: Panel DTB $PANEL_DTB not found in image" >&2
+    diskutil eject "$DEVICE" 2>/dev/null || true
+    exit 1
+fi
+cp "$BOOT_VOL/$PANEL_DTB" "$BOOT_VOL/kernel.dtb"
+
+# Write panel configuration
+printf 'PanelNum=%s\nPanelDTB=%s\n' "$PANEL_ID" "$PANEL_DTB" > "$BOOT_VOL/panel.txt"
+echo "confirmed" > "$BOOT_VOL/panel-confirmed"
+echo "$VARIANT" > "$BOOT_VOL/variant"
+
+sync
 
 # Eject disk safely
 diskutil eject "$DEVICE" 2>/dev/null || true
@@ -543,7 +551,9 @@ pub fn flash_image_privileged(
         "variant": variant,
         "progress_file": progress_file.to_string_lossy().to_string(),
     });
-    fs::write(&params_path, serde_json::to_string(&params).unwrap())
+    let params_json = serde_json::to_string(&params)
+        .map_err(|e| format!("Cannot serialize params: {}", e))?;
+    fs::write(&params_path, params_json)
         .map_err(|e| format!("Cannot write params: {}", e))?;
 
     // Step 3: Log file for the elevated process (its console is invisible)
@@ -701,35 +711,39 @@ try {
         $bootPart = Get-Partition -DiskNumber $diskNum -PartitionNumber 1 -ErrorAction SilentlyContinue
     }
 
-    if ($bootPart -and $bootPart.DriveLetter -and $bootPart.DriveLetter -ne [char]0) {
-        $bootDrive = "$($bootPart.DriveLetter):\"
-
-        if (Test-Path $bootDrive) {
-            # Copy selected panel DTB as kernel.dtb
-            $panelFile = Join-Path $bootDrive $PanelDTB
-            if (Test-Path $panelFile) {
-                Copy-Item $panelFile (Join-Path $bootDrive "kernel.dtb") -Force
-            }
-
-            # Write panel configuration (UTF-8, no BOM)
-            $enc = New-Object System.Text.UTF8Encoding($false)
-            [System.IO.File]::WriteAllText(
-                (Join-Path $bootDrive "panel.txt"),
-                "PanelNum=$PanelID`nPanelDTB=$PanelDTB`n",
-                $enc
-            )
-            [System.IO.File]::WriteAllText(
-                (Join-Path $bootDrive "panel-confirmed"),
-                "confirmed`n",
-                $enc
-            )
-            [System.IO.File]::WriteAllText(
-                (Join-Path $bootDrive "variant"),
-                "$Variant`n",
-                $enc
-            )
-        }
+    if (-not ($bootPart -and $bootPart.DriveLetter -and $bootPart.DriveLetter -ne [char]0)) {
+        throw "Could not mount boot partition to configure panel"
     }
+
+    $bootDrive = "$($bootPart.DriveLetter):\"
+    if (-not (Test-Path $bootDrive)) {
+        throw "Boot partition drive $bootDrive not accessible"
+    }
+
+    # Copy selected panel DTB as kernel.dtb
+    $panelFile = Join-Path $bootDrive $PanelDTB
+    if (-not (Test-Path $panelFile)) {
+        throw "Panel DTB $PanelDTB not found in image"
+    }
+    Copy-Item $panelFile (Join-Path $bootDrive "kernel.dtb") -Force
+
+    # Write panel configuration (UTF-8, no BOM)
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText(
+        (Join-Path $bootDrive "panel.txt"),
+        "PanelNum=$PanelID`nPanelDTB=$PanelDTB`n",
+        $enc
+    )
+    [System.IO.File]::WriteAllText(
+        (Join-Path $bootDrive "panel-confirmed"),
+        "confirmed`n",
+        $enc
+    )
+    [System.IO.File]::WriteAllText(
+        (Join-Path $bootDrive "variant"),
+        "$Variant`n",
+        $enc
+    )
 
     exit 0
 } catch {
