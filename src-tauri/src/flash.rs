@@ -48,6 +48,18 @@ fn validate_device(device: &str) -> Result<(), String> {
         }
     }
 
+    // On Windows: validate PhysicalDrive path format
+    #[cfg(target_os = "windows")]
+    {
+        if !device.starts_with("\\\\.\\PhysicalDrive") {
+            return Err(format!("Invalid device path: {}", device));
+        }
+        let disk_num = device.trim_start_matches("\\\\.\\PhysicalDrive");
+        if disk_num.is_empty() || !disk_num.chars().all(|c| c.is_ascii_digit()) {
+            return Err(format!("Invalid disk number in: {}", device));
+        }
+    }
+
     Ok(())
 }
 
@@ -122,7 +134,6 @@ pub fn flash_image_privileged(
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn decompress_xz(app: &AppHandle, src: &str, dst: &Path) -> Result<(), String> {
     let src_file = File::open(src)
         .map_err(|e| format!("Cannot open image: {}", e))?;
@@ -328,12 +339,181 @@ diskutil eject "$DEVICE" 2>/dev/null || true
 // ---------------------------------------------------------------------------
 #[cfg(target_os = "windows")]
 pub fn flash_image_privileged(
-    _app: &AppHandle,
-    _image_path: &str,
-    _device: &str,
-    _panel_dtb: &str,
-    _panel_id: &str,
-    _variant: &str,
+    app: &AppHandle,
+    image_path: &str,
+    device: &str,
+    panel_dtb: &str,
+    panel_id: &str,
+    variant: &str,
 ) -> Result<(), String> {
-    Err("Windows flash not yet implemented".into())
+    use std::process::Command;
+    use std::path::PathBuf;
+
+    validate_device(device)?;
+
+    let is_xz = image_path.ends_with(".xz");
+
+    // Step 1: Decompress .xz in user space (with progress)
+    let img_to_flash = if is_xz {
+        emit_progress(app, 0.0, "decompressing");
+        let temp_img = std::env::temp_dir().join("archr-flash-temp.img");
+        decompress_xz(app, image_path, &temp_img)?;
+        temp_img
+    } else {
+        PathBuf::from(image_path)
+    };
+
+    // Step 2: Write helper script and params to temp
+    let script_path = std::env::temp_dir().join("archr-flash.ps1");
+    fs::write(&script_path, FLASH_SCRIPT_WINDOWS)
+        .map_err(|e| format!("Cannot write helper script: {}", e))?;
+
+    let params_path = std::env::temp_dir().join("archr-flash-params.json");
+    let params = serde_json::json!({
+        "image": img_to_flash.to_string_lossy().to_string(),
+        "device": device,
+        "panel_dtb": panel_dtb,
+        "panel_id": panel_id,
+        "variant": variant,
+    });
+    fs::write(&params_path, serde_json::to_string(&params).unwrap())
+        .map_err(|e| format!("Cannot write params: {}", e))?;
+
+    // Step 3: Run elevated via UAC (Start-Process -Verb RunAs triggers UAC prompt)
+    emit_progress(app, 60.0, "writing");
+
+    let script_escaped = script_path.display().to_string().replace('\'', "''");
+    let cmd = format!(
+        "$p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{}'); exit $p.ExitCode",
+        script_escaped
+    );
+
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &cmd])
+        .output()
+        .map_err(|e| format!("Failed to run PowerShell: {}", e))?;
+
+    // Cleanup temp files
+    let _ = fs::remove_file(&script_path);
+    let _ = fs::remove_file(&params_path);
+    if is_xz {
+        let _ = fs::remove_file(&img_to_flash);
+    }
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("{}{}", stderr, stdout);
+        if combined.contains("canceled") || combined.contains("cancelled") {
+            return Err("cancelled".into());
+        }
+        return Err(format!("Flash failed: {}", combined.trim()));
+    }
+
+    emit_progress(app, 95.0, "configuring");
+    emit_progress(app, 100.0, "done");
+
+    Ok(())
 }
+
+#[cfg(target_os = "windows")]
+const FLASH_SCRIPT_WINDOWS: &str = r#"
+$ErrorActionPreference = "Stop"
+try {
+    $paramsFile = Join-Path $env:TEMP "archr-flash-params.json"
+    $params = Get-Content $paramsFile -Raw | ConvertFrom-Json
+    $ImagePath = $params.image
+    $Device = $params.device
+    $PanelDTB = $params.panel_dtb
+    $PanelID = $params.panel_id
+    $Variant = $params.variant
+
+    # Extract disk number from \\.\PhysicalDriveN
+    $diskNum = [int]([regex]::Match($Device, '\d+$').Value)
+
+    # Step 1: Clean disk via diskpart (removes partitions, releases volume locks)
+    $dpClean = @"
+select disk $diskNum
+clean
+"@
+    $dpClean | diskpart | Out-Null
+    Start-Sleep -Seconds 1
+
+    # Step 2: Write raw image to physical drive via .NET FileStream
+    $bufSize = 4 * 1024 * 1024
+    $buf = New-Object byte[] $bufSize
+
+    $src = [System.IO.FileStream]::new(
+        $ImagePath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read,
+        $bufSize
+    )
+    $dst = [System.IO.FileStream]::new(
+        $Device,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::ReadWrite,
+        $bufSize
+    )
+
+    try {
+        while (($read = $src.Read($buf, 0, $bufSize)) -gt 0) {
+            $dst.Write($buf, 0, $read)
+        }
+        $dst.Flush()
+    } finally {
+        $src.Dispose()
+        $dst.Dispose()
+    }
+
+    # Step 3: Rescan disks to detect new partition table
+    "rescan" | diskpart | Out-Null
+    Start-Sleep -Seconds 3
+
+    # Step 4: Find boot partition (FAT32, partition 1) and mount it
+    $bootPart = Get-Partition -DiskNumber $diskNum -PartitionNumber 1 -ErrorAction SilentlyContinue
+
+    if ($bootPart -and (-not $bootPart.DriveLetter -or $bootPart.DriveLetter -eq [char]0)) {
+        $bootPart | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        $bootPart = Get-Partition -DiskNumber $diskNum -PartitionNumber 1 -ErrorAction SilentlyContinue
+    }
+
+    if ($bootPart -and $bootPart.DriveLetter -and $bootPart.DriveLetter -ne [char]0) {
+        $bootDrive = "$($bootPart.DriveLetter):\"
+
+        if (Test-Path $bootDrive) {
+            # Copy selected panel DTB as kernel.dtb
+            $panelFile = Join-Path $bootDrive $PanelDTB
+            if (Test-Path $panelFile) {
+                Copy-Item $panelFile (Join-Path $bootDrive "kernel.dtb") -Force
+            }
+
+            # Write panel configuration (UTF-8, no BOM)
+            $enc = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText(
+                (Join-Path $bootDrive "panel.txt"),
+                "PanelNum=$PanelID`nPanelDTB=$PanelDTB`n",
+                $enc
+            )
+            [System.IO.File]::WriteAllText(
+                (Join-Path $bootDrive "panel-confirmed"),
+                "confirmed`n",
+                $enc
+            )
+            [System.IO.File]::WriteAllText(
+                (Join-Path $bootDrive "variant"),
+                "$Variant`n",
+                $enc
+            )
+        }
+    }
+
+    exit 0
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
+"#;
