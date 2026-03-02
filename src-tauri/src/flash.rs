@@ -1,6 +1,10 @@
 use std::io::{BufReader, Read, Write};
 use std::fs::{self, File};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
 
@@ -63,6 +67,50 @@ fn validate_device(device: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Check available temp space before XZ decompression.
+/// XZ images decompress to ~3-4x their compressed size.
+fn check_temp_space(image_path: &str) -> Result<(), String> {
+    let src_size = fs::metadata(image_path)
+        .map_err(|e| format!("Cannot read image: {}", e))?.len();
+    let needed = src_size * 4;
+    let temp_dir = std::env::temp_dir();
+    let available = fs2::available_space(&temp_dir)
+        .map_err(|e| format!("Cannot check disk space: {}", e))?;
+
+    if available < needed {
+        let need_gb = needed as f64 / 1_000_000_000.0;
+        let have_gb = available as f64 / 1_000_000_000.0;
+        return Err(format!(
+            "Not enough temp space: need {:.1} GB, have {:.1} GB",
+            need_gb, have_gb
+        ));
+    }
+    Ok(())
+}
+
+/// Poll a progress file written by the flash script.
+/// Maps bytes written (0..image_size) to progress (60%..95%).
+fn poll_flash_progress(
+    app: AppHandle,
+    progress_file: PathBuf,
+    image_size: u64,
+    stop: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(500));
+            if let Ok(content) = fs::read_to_string(&progress_file) {
+                if let Ok(bytes) = content.trim().parse::<u64>() {
+                    if image_size > 0 {
+                        let pct = 60.0 + (bytes as f64 / image_size as f64 * 35.0).min(35.0);
+                        emit_progress(&app, pct, "writing");
+                    }
+                }
+            }
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Linux: pkexec + helper script
 // ---------------------------------------------------------------------------
@@ -75,13 +123,17 @@ pub fn flash_image_privileged(
     panel_id: &str,
     variant: &str,
 ) -> Result<(), String> {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
 
     validate_device(device)?;
 
     let is_xz = image_path.ends_with(".xz");
+
+    // Check temp space before decompression
+    if is_xz {
+        check_temp_space(image_path)?;
+    }
 
     // Step 1: Decompress .xz in user space (with progress)
     let img_to_flash = if is_xz {
@@ -93,6 +145,10 @@ pub fn flash_image_privileged(
         PathBuf::from(image_path)
     };
 
+    // Get decompressed image size for progress tracking
+    let image_size = fs::metadata(&img_to_flash)
+        .map(|m| m.len()).unwrap_or(0);
+
     // Step 2: Write helper script to temp file
     let script_path = std::env::temp_dir().join("archr-flash.sh");
     fs::write(&script_path, FLASH_SCRIPT)
@@ -100,10 +156,18 @@ pub fn flash_image_privileged(
     fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
         .map_err(|e| format!("Cannot set script permissions: {}", e))?;
 
-    // Step 3: Run via pkexec (writes image + configures panel)
+    // Step 3: Set up progress file and run via pkexec
+    let progress_file = std::env::temp_dir().join("archr-flash-progress");
+    fs::write(&progress_file, "0").ok();
+
     emit_progress(app, 60.0, "writing");
 
-    let output = Command::new("pkexec")
+    let stop = Arc::new(AtomicBool::new(false));
+    let poll_handle = poll_flash_progress(
+        app.clone(), progress_file.clone(), image_size, stop.clone(),
+    );
+
+    let child = Command::new("pkexec")
         .arg("bash")
         .arg(&script_path)
         .arg(img_to_flash.to_str().unwrap_or(""))
@@ -111,11 +175,21 @@ pub fn flash_image_privileged(
         .arg(panel_dtb)
         .arg(panel_id)
         .arg(variant)
-        .output()
+        .arg(&progress_file)
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Failed to run pkexec: {}", e))?;
+
+    let output = child.wait_with_output()
+        .map_err(|e| format!("Failed to wait for pkexec: {}", e))?;
+
+    // Stop polling thread
+    stop.store(true, Ordering::Relaxed);
+    let _ = poll_handle.join();
 
     // Cleanup temp files
     let _ = fs::remove_file(&script_path);
+    let _ = fs::remove_file(&progress_file);
     if is_xz {
         let _ = fs::remove_file(&img_to_flash);
     }
@@ -128,7 +202,7 @@ pub fn flash_image_privileged(
         return Err(format!("Flash failed: {}", stderr));
     }
 
-    emit_progress(app, 95.0, "configuring");
+    emit_progress(app, 95.0, "syncing");
     emit_progress(app, 100.0, "done");
 
     Ok(())
@@ -175,9 +249,25 @@ DEVICE="$2"
 PANEL_DTB="$3"
 PANEL_ID="$4"
 VARIANT="$5"
+PROGRESS_FILE="$6"
 
-# Write raw image to device
-dd if="$IMAGE" of="$DEVICE" bs=4M conv=fsync status=none
+# Write raw image to device with progress tracking
+IMAGE_SIZE=$(stat -c%s "$IMAGE")
+dd if="$IMAGE" of="$DEVICE" bs=4M conv=fsync status=none &
+DD_PID=$!
+
+# Monitor dd progress via /proc/fdinfo
+while kill -0 $DD_PID 2>/dev/null; do
+    sleep 1
+    if [ -f "/proc/$DD_PID/fdinfo/1" ]; then
+        POS=$(grep '^pos:' "/proc/$DD_PID/fdinfo/1" 2>/dev/null | awk '{print $2}')
+        if [ -n "$POS" ]; then
+            echo "$POS" > "$PROGRESS_FILE"
+        fi
+    fi
+done
+wait $DD_PID
+
 sync
 
 # Re-read partition table
@@ -208,6 +298,9 @@ echo "$VARIANT" > "$MOUNT_DIR/variant"
 sync
 umount "$MOUNT_DIR"
 rmdir "$MOUNT_DIR"
+
+# Eject the device
+eject "$DEVICE" 2>/dev/null || true
 "#;
 
 // ---------------------------------------------------------------------------
@@ -222,13 +315,17 @@ pub fn flash_image_privileged(
     panel_id: &str,
     variant: &str,
 ) -> Result<(), String> {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
 
     validate_device(device)?;
 
     let is_xz = image_path.ends_with(".xz");
+
+    // Check temp space before decompression
+    if is_xz {
+        check_temp_space(image_path)?;
+    }
 
     // Step 1: Decompress .xz in user space (with progress)
     let img_to_flash = if is_xz {
@@ -239,6 +336,10 @@ pub fn flash_image_privileged(
     } else {
         PathBuf::from(image_path)
     };
+
+    // Get decompressed image size for progress tracking
+    let image_size = fs::metadata(&img_to_flash)
+        .map(|m| m.len()).unwrap_or(0);
 
     // Step 2: Unmount disk (macOS auto-mounts SD cards)
     let _ = Command::new("diskutil")
@@ -252,26 +353,45 @@ pub fn flash_image_privileged(
     fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
         .map_err(|e| format!("Cannot set script permissions: {}", e))?;
 
-    // Step 4: Run via osascript with administrator privileges
+    // Step 4: Set up progress file
+    let progress_file = std::env::temp_dir().join("archr-flash-progress");
+    fs::write(&progress_file, "0").ok();
+
     emit_progress(app, 60.0, "writing");
 
+    let stop = Arc::new(AtomicBool::new(false));
+    let poll_handle = poll_flash_progress(
+        app.clone(), progress_file.clone(), image_size, stop.clone(),
+    );
+
+    // Step 5: Run via osascript with administrator privileges
     // Sanitize all values for AppleScript single-quote context:
     // escape ' → '\'' (end quote, literal quote, reopen quote)
     let esc = |s: &str| s.replace('\'', "'\\''");
     let cmd = format!(
-        "do shell script \"bash '{}' '{}' '{}' '{}' '{}' '{}'\" with administrator privileges",
+        "do shell script \"bash '{}' '{}' '{}' '{}' '{}' '{}' '{}'\" with administrator privileges",
         esc(&script_path.display().to_string()),
         esc(&img_to_flash.display().to_string()),
-        esc(device), esc(panel_dtb), esc(panel_id), esc(variant)
+        esc(device), esc(panel_dtb), esc(panel_id), esc(variant),
+        esc(&progress_file.display().to_string())
     );
 
-    let output = Command::new("osascript")
+    let child = Command::new("osascript")
         .args(["-e", &cmd])
-        .output()
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("osascript error: {}", e))?;
+
+    let output = child.wait_with_output()
+        .map_err(|e| format!("Failed to wait for osascript: {}", e))?;
+
+    // Stop polling thread
+    stop.store(true, Ordering::Relaxed);
+    let _ = poll_handle.join();
 
     // Cleanup
     let _ = fs::remove_file(&script_path);
+    let _ = fs::remove_file(&progress_file);
     if is_xz {
         let _ = fs::remove_file(&img_to_flash);
     }
@@ -284,7 +404,7 @@ pub fn flash_image_privileged(
         return Err(format!("Flash failed: {}", stderr));
     }
 
-    emit_progress(app, 95.0, "configuring");
+    emit_progress(app, 95.0, "syncing");
     emit_progress(app, 100.0, "done");
 
     Ok(())
@@ -299,13 +419,33 @@ DEVICE="$2"
 PANEL_DTB="$3"
 PANEL_ID="$4"
 VARIANT="$5"
+PROGRESS_FILE="$6"
 
 # Unmount all partitions (in case auto-mounted again)
 diskutil unmountDisk "$DEVICE" 2>/dev/null || true
 
 # Write raw image to device (macOS uses rdisk for raw access = faster)
 RDISK=$(echo "$DEVICE" | sed 's|/dev/disk|/dev/rdisk|')
-dd if="$IMAGE" of="$RDISK" bs=4m
+
+# dd in background, monitor via SIGINFO
+DD_STDERR=$(mktemp)
+dd if="$IMAGE" of="$RDISK" bs=4m 2>"$DD_STDERR" &
+DD_PID=$!
+
+# Monitor progress: send SIGINFO periodically, parse stderr for bytes
+while kill -0 $DD_PID 2>/dev/null; do
+    sleep 1
+    kill -INFO $DD_PID 2>/dev/null || true
+    sleep 0.5
+    # BSD dd prints "N bytes transferred" to stderr
+    BYTES=$(tail -1 "$DD_STDERR" 2>/dev/null | grep -o '^[0-9]*' || true)
+    if [ -n "$BYTES" ] && [ "$BYTES" -gt 0 ] 2>/dev/null; then
+        echo "$BYTES" > "$PROGRESS_FILE"
+    fi
+done
+wait $DD_PID
+rm -f "$DD_STDERR"
+
 sync
 
 # Re-mount disk so we can access boot partition
@@ -346,12 +486,16 @@ pub fn flash_image_privileged(
     panel_id: &str,
     variant: &str,
 ) -> Result<(), String> {
-    use std::process::Command;
-    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
 
     validate_device(device)?;
 
     let is_xz = image_path.ends_with(".xz");
+
+    // Check temp space before decompression
+    if is_xz {
+        check_temp_space(image_path)?;
+    }
 
     // Step 1: Decompress .xz in user space (with progress)
     let img_to_flash = if is_xz {
@@ -363,10 +507,17 @@ pub fn flash_image_privileged(
         PathBuf::from(image_path)
     };
 
+    // Get decompressed image size for progress tracking
+    let image_size = fs::metadata(&img_to_flash)
+        .map(|m| m.len()).unwrap_or(0);
+
     // Step 2: Write helper script and params to temp
     let script_path = std::env::temp_dir().join("archr-flash.ps1");
     fs::write(&script_path, FLASH_SCRIPT_WINDOWS)
         .map_err(|e| format!("Cannot write helper script: {}", e))?;
+
+    let progress_file = std::env::temp_dir().join("archr-flash-progress");
+    fs::write(&progress_file, "0").ok();
 
     let params_path = std::env::temp_dir().join("archr-flash-params.json");
     let params = serde_json::json!({
@@ -375,6 +526,7 @@ pub fn flash_image_privileged(
         "panel_dtb": panel_dtb,
         "panel_id": panel_id,
         "variant": variant,
+        "progress_file": progress_file.to_string_lossy().to_string(),
     });
     fs::write(&params_path, serde_json::to_string(&params).unwrap())
         .map_err(|e| format!("Cannot write params: {}", e))?;
@@ -382,20 +534,34 @@ pub fn flash_image_privileged(
     // Step 3: Run elevated via UAC (Start-Process -Verb RunAs triggers UAC prompt)
     emit_progress(app, 60.0, "writing");
 
+    let stop = Arc::new(AtomicBool::new(false));
+    let poll_handle = poll_flash_progress(
+        app.clone(), progress_file.clone(), image_size, stop.clone(),
+    );
+
     let script_escaped = script_path.display().to_string().replace('\'', "''");
     let cmd = format!(
         "$p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{}'); exit $p.ExitCode",
         script_escaped
     );
 
-    let output = Command::new("powershell")
+    let child = Command::new("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &cmd])
-        .output()
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Failed to run PowerShell: {}", e))?;
+
+    let output = child.wait_with_output()
+        .map_err(|e| format!("Failed to wait for PowerShell: {}", e))?;
+
+    // Stop polling thread
+    stop.store(true, Ordering::Relaxed);
+    let _ = poll_handle.join();
 
     // Cleanup temp files
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(&params_path);
+    let _ = fs::remove_file(&progress_file);
     if is_xz {
         let _ = fs::remove_file(&img_to_flash);
     }
@@ -410,7 +576,7 @@ pub fn flash_image_privileged(
         return Err(format!("Flash failed: {}", combined.trim()));
     }
 
-    emit_progress(app, 95.0, "configuring");
+    emit_progress(app, 95.0, "syncing");
     emit_progress(app, 100.0, "done");
 
     Ok(())
@@ -427,6 +593,7 @@ try {
     $PanelDTB = $params.panel_dtb
     $PanelID = $params.panel_id
     $Variant = $params.variant
+    $ProgressFile = $params.progress_file
 
     # Extract disk number from \\.\PhysicalDriveN
     $diskNum = [int]([regex]::Match($Device, '\d+$').Value)
@@ -442,6 +609,8 @@ clean
     # Step 2: Write raw image to physical drive via .NET FileStream
     $bufSize = 4 * 1024 * 1024
     $buf = New-Object byte[] $bufSize
+    $totalWritten = [long]0
+    $lastReport = [System.Diagnostics.Stopwatch]::StartNew()
 
     $src = [System.IO.FileStream]::new(
         $ImagePath,
@@ -461,6 +630,11 @@ clean
     try {
         while (($read = $src.Read($buf, 0, $bufSize)) -gt 0) {
             $dst.Write($buf, 0, $read)
+            $totalWritten += $read
+            if ($lastReport.ElapsedMilliseconds -ge 500) {
+                [System.IO.File]::WriteAllText($ProgressFile, $totalWritten.ToString())
+                $lastReport.Restart()
+            }
         }
         $dst.Flush()
     } finally {

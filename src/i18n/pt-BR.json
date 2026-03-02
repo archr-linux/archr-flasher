@@ -32,5 +32,15 @@
   "flash_cancelled": "Gravacao cancelada.",
   "done": "SD card pronto! Insira no R36S e ligue.",
   "error_select_file": "Erro ao selecionar arquivo: ",
-  "checking_version": "Verificando ultima versao..."
+  "checking_version": "Verificando ultima versao...",
+  "error": "Erro",
+  "error_no_space": "Espaco insuficiente para descompressao.",
+  "error_device_removed": "Dispositivo nao encontrado. O SD card foi removido?",
+  "error_not_removable": "O disco selecionado nao e removivel.",
+  "error_no_image": "Nenhuma imagem encontrada na ultima versao.",
+  "error_network": "Erro de rede. Verifique sua conexao.",
+  "error_checksum_failed": "Verificacao de checksum falhou. Baixe a imagem novamente.",
+  "verifying_checksum": "Verificando checksum...",
+  "latest_version": "Ultima: {version}",
+  "offline": "Offline"
 }

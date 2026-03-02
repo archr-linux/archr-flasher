@@ -32,5 +32,15 @@
   "flash_cancelled": "Flash cancelled.",
   "done": "SD card ready! Insert in R36S and power on.",
   "error_select_file": "Error selecting file: ",
-  "checking_version": "Checking latest version..."
+  "checking_version": "Checking latest version...",
+  "error": "Error",
+  "error_no_space": "Not enough disk space for decompression.",
+  "error_device_removed": "Device not found. Was the SD card removed?",
+  "error_not_removable": "Selected disk is not a removable device.",
+  "error_no_image": "No image found in latest release.",
+  "error_network": "Network error. Check your internet connection.",
+  "error_checksum_failed": "Checksum verification failed. Re-download the image.",
+  "verifying_checksum": "Verifying checksum...",
+  "latest_version": "Latest: {version}",
+  "offline": "Offline"
 }

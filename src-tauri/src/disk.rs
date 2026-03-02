@@ -168,6 +168,20 @@ pub fn list_removable_disks() -> Vec<DiskInfo> {
         }
     }
 
+    // Exclude boot disk (safety: never flash the system disk)
+    if let Ok(boot_info) = Command::new("diskutil").args(["info", "/"]).output() {
+        let info_str = String::from_utf8_lossy(&boot_info.stdout);
+        for line in info_str.lines() {
+            if line.contains("Part of Whole:") {
+                if let Some(disk_name) = line.split(':').nth(1) {
+                    let boot_disk = format!("/dev/{}", disk_name.trim());
+                    device_names.retain(|d| d != &boot_disk);
+                }
+                break;
+            }
+        }
+    }
+
     for device in device_names {
         // Get detailed info for each disk
         let info_output = Command::new("diskutil")
@@ -219,7 +233,7 @@ pub fn list_removable_disks() -> Vec<DiskInfo> {
     let output = Command::new("powershell")
         .args([
             "-NoProfile", "-Command",
-            "Get-Disk | Where-Object { $_.BusType -eq 'USB' -or $_.BusType -eq 'SD' } | Select-Object Number, FriendlyName, Size | ConvertTo-Json"
+            "Get-Disk | Where-Object { ($_.BusType -eq 'USB' -or $_.BusType -eq 'SD') -and $_.IsSystem -eq $false -and $_.IsBoot -eq $false } | Select-Object Number, FriendlyName, Size | ConvertTo-Json"
         ])
         .output();
 

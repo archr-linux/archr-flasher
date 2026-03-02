@@ -5,7 +5,7 @@
 // i18n
 // ---------------------------------------------------------------------------
 let lang = {};
-const SUPPORTED_LOCALES = ['en', 'pt-BR'];
+const SUPPORTED_LOCALES = ['en', 'pt-BR', 'es', 'zh'];
 
 async function initI18n() {
   try {
@@ -265,7 +265,7 @@ $('btn-download').addEventListener('click', async () => {
       if (!busy) progressSection.style.display = 'none';
     }, 2000);
   } catch (e) {
-    setStatus('Error: ' + e, 'error');
+    setStatus(translateError(e), 'error');
     progressSection.style.display = 'none';
   }
 
@@ -329,7 +329,7 @@ async function startFlash() {
       setStatus(t('flash_cancelled'), '');
       progressSection.style.display = 'none';
     } else {
-      setStatus('Error: ' + e, 'error');
+      setStatus(translateError(e), 'error');
     }
   }
 
@@ -358,7 +358,39 @@ function formatBytes(bytes) {
   return bytes + ' B';
 }
 
+function translateError(msg) {
+  if (typeof msg !== 'string') msg = String(msg);
+  const patterns = [
+    [/cancelled|canceled/i, 'flash_cancelled'],
+    [/not enough temp space/i, 'error_no_space'],
+    [/device not found|removed/i, 'error_device_removed'],
+    [/not a removable/i, 'error_not_removable'],
+    [/no.*image.*found/i, 'error_no_image'],
+    [/network|dns|connect|timeout/i, 'error_network'],
+    [/checksum.*fail/i, 'error_checksum_failed'],
+  ];
+  for (const [regex, key] of patterns) {
+    if (regex.test(msg)) return t(key);
+  }
+  return t('error') + ': ' + msg;
+}
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
-initI18n();
+async function init() {
+  await initI18n();
+  checkLatestVersion(); // fire-and-forget (does not block UI)
+}
+
+async function checkLatestVersion() {
+  try {
+    const release = await window.__TAURI__.core.invoke('check_latest_release');
+    imageVersionEl.textContent = release.version;
+    setStatus(t('latest_version', { version: release.version }), '');
+  } catch (_) {
+    // offline or error — ignore silently
+  }
+}
+
+init();

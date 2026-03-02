@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Sha256, Digest};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 
@@ -72,7 +73,30 @@ pub async fn get_latest_release() -> Result<ReleaseInfo, String> {
     })
 }
 
+/// Verify SHA256 of a file against an expected hash.
+fn verify_sha256(path: &Path, expected: &str) -> bool {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return false,
+        }
+    }
+
+    let hash = format!("{:x}", hasher.finalize());
+    hash == expected
+}
+
 /// Download the image to cache_dir, emitting progress events.
+/// Computes SHA256 incrementally during download.
 /// Returns (file_path, was_cached).
 pub async fn download_image(
     app: &AppHandle,
@@ -83,12 +107,33 @@ pub async fn download_image(
         .map_err(|e| format!("Cannot create cache dir: {}", e))?;
 
     let dest = cache_dir.join(&release.image_name);
+    let hash_path = cache_dir.join(format!("{}.sha256", release.image_name));
 
     // Check if already cached (same name + matching size)
     if dest.exists() {
         if let Ok(meta) = fs::metadata(&dest) {
             if meta.len() == release.size_bytes {
-                return Ok((dest, true));
+                // If we have a stored hash, verify integrity
+                if let Ok(stored_hash) = fs::read_to_string(&hash_path) {
+                    let stored_hash = stored_hash.trim().to_string();
+                    if !stored_hash.is_empty() {
+                        let _ = app.emit("download-progress", DownloadProgress {
+                            percent: 0.0,
+                            downloaded_bytes: 0,
+                            total_bytes: meta.len(),
+                        });
+
+                        if verify_sha256(&dest, &stored_hash) {
+                            return Ok((dest, true));
+                        }
+                        // Hash mismatch: delete and re-download
+                        let _ = fs::remove_file(&dest);
+                        let _ = fs::remove_file(&hash_path);
+                    }
+                } else {
+                    // No hash file (backward compat) — trust size match
+                    return Ok((dest, true));
+                }
             }
         }
     }
@@ -115,6 +160,7 @@ pub async fn download_image(
     let mut file = File::create(&temp)
         .map_err(|e| format!("Cannot create file: {}", e))?;
 
+    let mut hasher = Sha256::new();
     let mut downloaded: u64 = 0;
     let mut response = response;
 
@@ -125,6 +171,7 @@ pub async fn download_image(
     {
         file.write_all(&chunk)
             .map_err(|e| format!("Write error: {}", e))?;
+        hasher.update(&chunk);
         downloaded += chunk.len() as u64;
 
         let percent = if total > 0 {
@@ -145,6 +192,10 @@ pub async fn download_image(
 
     file.flush().map_err(|e| format!("Flush error: {}", e))?;
     drop(file);
+
+    // Compute final hash and save
+    let hash = format!("{:x}", hasher.finalize());
+    let _ = fs::write(&hash_path, &hash);
 
     // Rename .part → final name
     fs::rename(&temp, &dest)
