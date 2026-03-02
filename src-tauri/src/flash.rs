@@ -531,7 +531,11 @@ pub fn flash_image_privileged(
     fs::write(&params_path, serde_json::to_string(&params).unwrap())
         .map_err(|e| format!("Cannot write params: {}", e))?;
 
-    // Step 3: Run elevated via UAC (Start-Process -Verb RunAs triggers UAC prompt)
+    // Step 3: Log file for the elevated process (its console is invisible)
+    let log_file = std::env::temp_dir().join("archr-flash-log.txt");
+    let _ = fs::remove_file(&log_file);
+
+    // Step 4: Run elevated via UAC (Start-Process -Verb RunAs triggers UAC prompt)
     emit_progress(app, 60.0, "writing");
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -539,15 +543,29 @@ pub fn flash_image_privileged(
         app.clone(), progress_file.clone(), image_size, stop.clone(),
     );
 
-    let script_escaped = script_path.display().to_string().replace('\'', "''");
-    let cmd = format!(
-        "$p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{}'); exit $p.ExitCode",
-        script_escaped
+    // Encode script path for PowerShell — use -EncodedCommand to avoid path escaping issues
+    let inner_cmd = format!(
+        "Set-ExecutionPolicy Bypass -Scope Process -Force; & '{}' *> '{}'",
+        script_path.display().to_string().replace('\'', "''"),
+        log_file.display().to_string().replace('\'', "''"),
+    );
+    let encoded = {
+        let utf16: Vec<u8> = inner_cmd.encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(&utf16)
+    };
+
+    let launcher_cmd = format!(
+        "try {{ $p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile','-EncodedCommand','{}'); if ($p) {{ exit $p.ExitCode }} else {{ exit 1 }} }} catch {{ exit 1 }}",
+        encoded
     );
 
     let child = Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &cmd])
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &launcher_cmd])
         .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to run PowerShell: {}", e))?;
 
@@ -558,10 +576,14 @@ pub fn flash_image_privileged(
     stop.store(true, Ordering::Relaxed);
     let _ = poll_handle.join();
 
+    // Read the elevated process log for error details
+    let log_content = fs::read_to_string(&log_file).unwrap_or_default();
+
     // Cleanup temp files
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(&params_path);
     let _ = fs::remove_file(&progress_file);
+    let _ = fs::remove_file(&log_file);
     if is_xz {
         let _ = fs::remove_file(&img_to_flash);
     }
@@ -569,11 +591,17 @@ pub fn flash_image_privileged(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let combined = format!("{}{}", stderr, stdout);
-        if combined.contains("canceled") || combined.contains("cancelled") {
+        let combined = format!("{}{}{}", stderr, stdout, log_content);
+        if combined.contains("canceled") || combined.contains("cancelled")
+            || combined.contains("The operation was canceled") {
             return Err("cancelled".into());
         }
-        return Err(format!("Flash failed: {}", combined.trim()));
+        let error_msg = if !log_content.trim().is_empty() {
+            log_content.trim().to_string()
+        } else {
+            format!("{}{}", stderr.trim(), stdout.trim())
+        };
+        return Err(format!("Flash failed: {}", error_msg));
     }
 
     emit_progress(app, 95.0, "syncing");
@@ -598,13 +626,12 @@ try {
     # Extract disk number from \\.\PhysicalDriveN
     $diskNum = [int]([regex]::Match($Device, '\d+$').Value)
 
-    # Step 1: Clean disk via diskpart (removes partitions, releases volume locks)
-    $dpClean = @"
-select disk $diskNum
-clean
-"@
-    $dpClean | diskpart | Out-Null
-    Start-Sleep -Seconds 1
+    # Step 1: Take disk offline, clean via diskpart script file (pipe is unreliable)
+    $dpScript = Join-Path $env:TEMP "archr-diskpart.txt"
+    "select disk $diskNum`r`noffline disk`r`nonline disk`r`nclean" | Out-File -Encoding ascii $dpScript
+    $dpOut = & diskpart /s $dpScript 2>&1
+    Remove-Item $dpScript -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
 
     # Step 2: Write raw image to physical drive via .NET FileStream
     $bufSize = 4 * 1024 * 1024
@@ -619,6 +646,7 @@ clean
         [System.IO.FileShare]::Read,
         $bufSize
     )
+    # Open physical drive for raw write
     $dst = [System.IO.FileStream]::new(
         $Device,
         [System.IO.FileMode]::Open,
@@ -643,7 +671,10 @@ clean
     }
 
     # Step 3: Rescan disks to detect new partition table
-    "rescan" | diskpart | Out-Null
+    $dpScript2 = Join-Path $env:TEMP "archr-diskpart2.txt"
+    "rescan" | Out-File -Encoding ascii $dpScript2
+    & diskpart /s $dpScript2 2>&1 | Out-Null
+    Remove-Item $dpScript2 -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 3
 
     # Step 4: Find boot partition (FAT32, partition 1) and mount it
