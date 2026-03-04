@@ -119,8 +119,7 @@ pub fn flash_image_privileged(
     app: &AppHandle,
     image_path: &str,
     device: &str,
-    panel_dtb: &str,
-    panel_id: &str,
+    custom_dtbo_path: &str,
     variant: &str,
 ) -> Result<(), String> {
     use std::process::{Command, Stdio};
@@ -172,8 +171,7 @@ pub fn flash_image_privileged(
         .arg(&script_path)
         .arg(img_to_flash.to_str().unwrap_or(""))
         .arg(device)
-        .arg(panel_dtb)
-        .arg(panel_id)
+        .arg(custom_dtbo_path)
         .arg(variant)
         .arg(&progress_file)
         .stderr(Stdio::piped())
@@ -253,10 +251,9 @@ set -e
 
 IMAGE="$1"
 DEVICE="$2"
-PANEL_DTB="$3"
-PANEL_ID="$4"
-VARIANT="$5"
-PROGRESS_FILE="$6"
+CUSTOM_DTBO="$3"
+VARIANT="$4"
+PROGRESS_FILE="$5"
 
 # Recreate progress file as root (fs.protected_regular=2 on Ubuntu blocks
 # root from writing to user-owned files in /tmp via O_CREAT)
@@ -320,22 +317,14 @@ fi
 MOUNT_DIR=$(mktemp -d)
 mount "$BOOT_PART" "$MOUNT_DIR"
 
-# Copy selected panel DTB as kernel.dtb
-if [ ! -f "$MOUNT_DIR/$PANEL_DTB" ]; then
-    echo "ERROR: Panel DTB $PANEL_DTB not found in image" >&2
+# Copy custom DTBO as mipi-panel.dtbo
+if [ ! -f "$CUSTOM_DTBO" ]; then
+    echo "ERROR: Custom DTBO not found at $CUSTOM_DTBO" >&2
     umount "$MOUNT_DIR" 2>/dev/null || true
     rmdir "$MOUNT_DIR" 2>/dev/null || true
     exit 1
 fi
-cp "$MOUNT_DIR/$PANEL_DTB" "$MOUNT_DIR/kernel.dtb"
-
-# Remove all pre-merged panel DTBs — only kernel.dtb should remain
-rm -f "$MOUNT_DIR"/kernel-*.dtb
-
-# Write panel configuration
-printf 'PanelNum=%s\nPanelDTB=kernel.dtb\n' "$PANEL_ID" > "$MOUNT_DIR/panel.txt"
-echo "confirmed" > "$MOUNT_DIR/panel-confirmed"
-echo "$VARIANT" > "$MOUNT_DIR/variant"
+cp "$CUSTOM_DTBO" "$MOUNT_DIR/overlays/mipi-panel.dtbo"
 
 sync
 umount "$MOUNT_DIR"
@@ -353,8 +342,7 @@ pub fn flash_image_privileged(
     app: &AppHandle,
     image_path: &str,
     device: &str,
-    panel_dtb: &str,
-    panel_id: &str,
+    custom_dtbo_path: &str,
     variant: &str,
 ) -> Result<(), String> {
     use std::process::{Command, Stdio};
@@ -412,10 +400,10 @@ pub fn flash_image_privileged(
     // AppleScript do shell script uses double-quoted strings — escape \ and "
     let shell_esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"").replace('\'', "'\\''");
     let shell_cmd = format!(
-        "bash '{}' '{}' '{}' '{}' '{}' '{}' '{}'",
+        "bash '{}' '{}' '{}' '{}' '{}' '{}'",
         shell_esc(&script_path.display().to_string()),
         shell_esc(&img_to_flash.display().to_string()),
-        shell_esc(device), shell_esc(panel_dtb), shell_esc(panel_id), shell_esc(variant),
+        shell_esc(device), shell_esc(custom_dtbo_path), shell_esc(variant),
         shell_esc(&progress_file.display().to_string())
     );
     let applescript = format!(
@@ -463,10 +451,9 @@ set -e
 
 IMAGE="$1"
 DEVICE="$2"
-PANEL_DTB="$3"
-PANEL_ID="$4"
-VARIANT="$5"
-PROGRESS_FILE="$6"
+CUSTOM_DTBO="$3"
+VARIANT="$4"
+PROGRESS_FILE="$5"
 
 # RPi Imager technique: force unmount (kDADiskUnmountOptionForce equivalent)
 diskutil unmountDisk force "$DEVICE" 2>/dev/null || true
@@ -512,21 +499,13 @@ if [ -z "$BOOT_VOL" ] || [ ! -d "$BOOT_VOL" ]; then
     exit 1
 fi
 
-# Copy selected panel DTB as kernel.dtb
-if [ ! -f "$BOOT_VOL/$PANEL_DTB" ]; then
-    echo "ERROR: Panel DTB $PANEL_DTB not found in image" >&2
+# Copy custom DTBO as mipi-panel.dtbo
+if [ ! -f "$CUSTOM_DTBO" ]; then
+    echo "ERROR: Custom DTBO not found at $CUSTOM_DTBO" >&2
     diskutil eject "$DEVICE" 2>/dev/null || true
     exit 1
 fi
-cp "$BOOT_VOL/$PANEL_DTB" "$BOOT_VOL/kernel.dtb"
-
-# Remove all pre-merged panel DTBs — only kernel.dtb should remain
-rm -f "$BOOT_VOL"/kernel-*.dtb
-
-# Write panel configuration
-printf 'PanelNum=%s\nPanelDTB=kernel.dtb\n' "$PANEL_ID" > "$BOOT_VOL/panel.txt"
-echo "confirmed" > "$BOOT_VOL/panel-confirmed"
-echo "$VARIANT" > "$BOOT_VOL/variant"
+cp "$CUSTOM_DTBO" "$BOOT_VOL/overlays/mipi-panel.dtbo"
 
 sync
 
@@ -543,8 +522,7 @@ pub fn flash_image_privileged(
     app: &AppHandle,
     image_path: &str,
     device: &str,
-    panel_dtb: &str,
-    panel_id: &str,
+    custom_dtbo_path: &str,
     variant: &str,
 ) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
@@ -584,8 +562,7 @@ pub fn flash_image_privileged(
     let script_content = generate_windows_script(
         &img_to_flash.to_string_lossy(),
         device,
-        panel_dtb,
-        panel_id,
+        custom_dtbo_path,
         variant,
         &progress_file.to_string_lossy(),
     );
@@ -644,8 +621,7 @@ pub fn flash_image_privileged(
 fn generate_windows_script(
     image_path: &str,
     device: &str,
-    panel_dtb: &str,
-    panel_id: &str,
+    custom_dtbo_path: &str,
     variant: &str,
     progress_file: &str,
 ) -> String {
@@ -655,8 +631,7 @@ fn generate_windows_script(
 try {{
     $ImagePath = '{image}'
     $Device = '{device}'
-    $PanelDTB = '{panel_dtb}'
-    $PanelID = '{panel_id}'
+    $CustomDTBO = '{custom_dtbo}'
     $Variant = '{variant}'
     $ProgressFile = '{progress}'
 
@@ -749,33 +724,12 @@ try {{
         throw "Boot partition drive $bootDrive not accessible"
     }}
 
-    # Copy selected panel DTB as kernel.dtb
-    $panelFile = Join-Path $bootDrive $PanelDTB
-    if (-not (Test-Path $panelFile)) {{
-        throw "Panel DTB $PanelDTB not found in image"
+    # Copy custom DTBO as mipi-panel.dtbo
+    $overlayDir = Join-Path $bootDrive "overlays"
+    if (-not (Test-Path $CustomDTBO)) {{
+        throw "Custom DTBO not found at $CustomDTBO"
     }}
-    Copy-Item $panelFile (Join-Path $bootDrive "kernel.dtb") -Force
-
-    # Remove all pre-merged panel DTBs — only kernel.dtb should remain
-    Get-ChildItem (Join-Path $bootDrive "kernel-*.dtb") -ErrorAction SilentlyContinue | Remove-Item -Force
-
-    # Write panel configuration (UTF-8 no BOM)
-    $enc = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText(
-        (Join-Path $bootDrive "panel.txt"),
-        "PanelNum=$PanelID`nPanelDTB=kernel.dtb`n",
-        $enc
-    )
-    [System.IO.File]::WriteAllText(
-        (Join-Path $bootDrive "panel-confirmed"),
-        "confirmed`n",
-        $enc
-    )
-    [System.IO.File]::WriteAllText(
-        (Join-Path $bootDrive "variant"),
-        "$Variant`n",
-        $enc
-    )
+    Copy-Item $CustomDTBO (Join-Path $overlayDir "mipi-panel.dtbo") -Force
 
     exit 0
 }} catch {{
@@ -785,8 +739,7 @@ try {{
 "#,
         image = esc(image_path),
         device = esc(device),
-        panel_dtb = esc(panel_dtb),
-        panel_id = esc(panel_id),
+        custom_dtbo = esc(custom_dtbo_path),
         variant = esc(variant),
         progress = esc(progress_file),
     )

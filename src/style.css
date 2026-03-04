@@ -78,6 +78,72 @@ header h1 {
   font-weight: 400;
 }
 
+/* Tab bar */
+.tab-bar {
+  display: flex;
+  gap: 0;
+  margin-bottom: 24px;
+  border-bottom: 2px solid var(--border);
+}
+
+.tab {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding: 10px 0;
+  cursor: pointer;
+  transition: all 0.15s;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  color: var(--blue);
+  border-bottom-color: var(--blue);
+}
+
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
+}
+
+/* Overlay info */
+.overlay-info {
+  background: var(--bg-section);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+}
+
+.overlay-info-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+
+.overlay-label {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.overlay-value {
+  font-size: 13px;
+  color: var(--text);
+}
+
 /* Sections */
 .section {
   margin-bottom: 20px;
@@ -354,6 +420,55 @@ header h1 {
 
 .btn-danger:hover {
   background: var(--danger-light);
+}
+
+/* Inline select (rotation dropdown) */
+.select-inline {
+  width: auto;
+  min-width: 100px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+/* Toggle switch */
+.toggle-switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  display: inline-block;
+}
+
+.toggle-switch input {
+  display: none;
+}
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--border);
+  border-radius: 11px;
+  cursor: pointer;
+  transition: 0.2s;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 3px;
+  bottom: 3px;
+  background: var(--text);
+  border-radius: 50%;
+  transition: 0.2s;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background: var(--blue);
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(18px);
 }
 
 /* Disabled state for all interactive elements */

@@ -1,6 +1,6 @@
 [package]
 name = "archr-flasher"
-version = "0.2.0"
+version = "1.0.0"
 description = "Arch R SD Card Flasher"
 authors = ["Arch R Linux"]
 edition = "2024"
@@ -20,6 +20,10 @@ xz2 = "0.1"
 sys-locale = "0.3"
 sha2 = "0.10"
 fs2 = "0.4"
+md-5 = "0.10"
+fdt = "0.1"
+fatfs = "0.3"
+fscommon = "0.1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 

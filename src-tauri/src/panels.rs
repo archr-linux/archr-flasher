@@ -4,34 +4,48 @@ use serde::Serialize;
 pub struct Panel {
     pub id: String,
     pub name: String,
-    pub dtb: String,
-    pub is_default: bool,
+    pub dtbo: String,
 }
 
+/// Original R36S panels (8 panels).
+/// DTBO names derived from DTS filenames in generate-panel-dtbos.sh.
+const PANELS_ORIGINAL: &[(&str, &str, &str)] = &[
+    ("0",    "Panel 0",          "panel0.dtbo"),
+    ("1",    "Panel 1",          "panel1.dtbo"),
+    ("2",    "Panel 2",          "panel2.dtbo"),
+    ("3",    "Panel 3",          "panel3.dtbo"),
+    ("4",    "Panel 4",          "panel4.dtbo"),
+    ("4v22", "Panel 4 V22",      "panel4-v22.dtbo"),
+    ("5",    "Panel 5",          "panel5.dtbo"),
+    ("r46h", "R46H (1024x768)",  "r46h.dtbo"),
+];
+
+/// Clone R36S panels (12 panels).
+/// DTBO names derived from CLONE_ORDER in generate-panel-dtbos.sh.
+const PANELS_CLONE: &[(&str, &str, &str)] = &[
+    ("C1",     "Clone 1 (ST7703)",         "clone_panel_1.dtbo"),
+    ("C2",     "Clone 2 (ST7703)",         "clone_panel_2.dtbo"),
+    ("C3",     "Clone 3 (NV3051D)",        "clone_panel_3.dtbo"),
+    ("C4",     "Clone 4 (NV3051D)",        "clone_panel_4.dtbo"),
+    ("C5",     "Clone 5 (ST7703)",         "clone_panel_5.dtbo"),
+    ("C6",     "Clone 6 (NV3051D)",        "clone_panel_6.dtbo"),
+    ("C7",     "Clone 7 (JD9365DA)",       "clone_panel_7.dtbo"),
+    ("C8",     "Clone 8 G80CA (ST7703)",   "clone_panel_8.dtbo"),
+    ("C9",     "Clone 9 (NV3051D)",        "clone_panel_9.dtbo"),
+    ("C10",    "Clone 10 (ST7703)",        "clone_panel_10.dtbo"),
+    ("R36Max", "R36 Max (ST7703 720x720)", "r36_max.dtbo"),
+    ("RX6S",   "RX6S (NV3051D)",           "rx6s.dtbo"),
+];
+
 pub fn get_panels(console: &str) -> Vec<Panel> {
-    match console {
-        "original" => vec![
-            Panel { id: "0".into(),  name: "Panel 0".into(),          dtb: "kernel-panel0.dtb".into(), is_default: false },
-            Panel { id: "1".into(),  name: "Panel 1-V10".into(),      dtb: "kernel-panel1.dtb".into(), is_default: false },
-            Panel { id: "2".into(),  name: "Panel 2-V12".into(),      dtb: "kernel-panel2.dtb".into(), is_default: false },
-            Panel { id: "3".into(),  name: "Panel 3-V20".into(),      dtb: "kernel-panel3.dtb".into(), is_default: false },
-            Panel { id: "4".into(),  name: "Panel 4-V22".into(),      dtb: "kernel-panel4.dtb".into(), is_default: false},
-            Panel { id: "5".into(),  name: "Panel 5-V22 Q8".into(),   dtb: "kernel-panel5.dtb".into(), is_default: false },
-        ],
-        "clone" => vec![
-            Panel { id: "C1".into(),     name: "Clone 1 (ST7703)".into(),          dtb: "kernel-clone1.dtb".into(),  is_default: false },
-            Panel { id: "C2".into(),     name: "Clone 2 (ST7703)".into(),          dtb: "kernel-clone2.dtb".into(),  is_default: false },
-            Panel { id: "C3".into(),     name: "Clone 3 (NV3051D)".into(),         dtb: "kernel-clone3.dtb".into(),  is_default: false },
-            Panel { id: "C4".into(),     name: "Clone 4 (NV3051D)".into(),         dtb: "kernel-clone4.dtb".into(),  is_default: false },
-            Panel { id: "C5".into(),     name: "Clone 5 (ST7703)".into(),          dtb: "kernel-clone5.dtb".into(),  is_default: false },
-            Panel { id: "C6".into(),     name: "Clone 6 (NV3051D)".into(),         dtb: "kernel-clone6.dtb".into(),  is_default: false },
-            Panel { id: "C7".into(),     name: "Clone 7 (JD9365DA)".into(),        dtb: "kernel-clone7.dtb".into(),  is_default: false },
-            Panel { id: "C8".into(),     name: "Clone 8 G80CA (ST7703)".into(),    dtb: "kernel-clone8.dtb".into(),  is_default: false},
-            Panel { id: "C9".into(),     name: "Clone 9 (NV3051D)".into(),         dtb: "kernel-clone9.dtb".into(),  is_default: false },
-            Panel { id: "C10".into(),    name: "Clone 10 (ST7703)".into(),         dtb: "kernel-clone10.dtb".into(), is_default: false },
-            Panel { id: "R36Max".into(), name: "R36 Max (ST7703 720x720)".into(),  dtb: "kernel-r36max.dtb".into(),  is_default: false },
-            Panel { id: "RX6S".into(),   name: "RX6S (NV3051D)".into(),            dtb: "kernel-rx6s.dtb".into(),    is_default: false },
-        ],
-        _ => vec![],
-    }
+    let source = match console {
+        "original" => PANELS_ORIGINAL,
+        "clone" => PANELS_CLONE,
+        _ => return vec![],
+    };
+    source.iter().map(|(id, name, dtbo)| Panel {
+        id: id.to_string(),
+        name: name.to_string(),
+        dtbo: dtbo.to_string(),
+    }).collect()
 }

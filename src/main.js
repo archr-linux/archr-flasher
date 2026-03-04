@@ -53,6 +53,20 @@ function applyI18n() {
 }
 
 // ---------------------------------------------------------------------------
+// Tabs
+// ---------------------------------------------------------------------------
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    if (busy) return;
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    const contentId = 'content-' + tab.id.replace('tab-', '');
+    document.getElementById(contentId).classList.add('active');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 let selectedConsole = null;
@@ -62,7 +76,7 @@ let imagePath = null;
 let busy = false;
 
 // ---------------------------------------------------------------------------
-// DOM
+// DOM — Flash tab
 // ---------------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
 const btnOriginal = $('btn-original');
@@ -93,6 +107,7 @@ function setBusy(isBusy) {
     $('btn-select-file'), $('btn-download'), $('btn-refresh-disks'),
   ];
   controls.forEach(el => { if (el) el.disabled = isBusy; });
+  document.querySelectorAll('.tab').forEach(t => t.disabled = isBusy);
   updateFlashButton();
 }
 
@@ -108,10 +123,8 @@ function selectConsole(console) {
   btnOriginal.classList.toggle('active', console === 'original');
   btnClone.classList.toggle('active', console === 'clone');
 
-  // Show image section (step 2) now that console is chosen
   $('image-section').style.display = '';
 
-  // Clear downloaded image when switching variant (wrong image for this console)
   if (changed && imagePath) {
     imagePath = null;
     imageNameEl.textContent = t('no_image');
@@ -122,6 +135,7 @@ function selectConsole(console) {
 
   loadPanels(console);
   panelSection.style.display = '';
+  $('customization-section').style.display = 'none';
   diskSection.style.display = 'none';
   flashSection.style.display = 'none';
   updateFlashButton();
@@ -133,19 +147,20 @@ btnClone.addEventListener('click', () => selectConsole('clone'));
 // ---------------------------------------------------------------------------
 // Panel loading
 // ---------------------------------------------------------------------------
-async function loadPanels(console) {
+async function loadPanels(console, selectEl) {
+  const target = selectEl || panelSelect;
   const panels = await window.__TAURI__.core.invoke('get_panels', { console });
 
-  panelSelect.innerHTML = `<option value="">${t('select_panel')}</option>`;
+  target.innerHTML = `<option value="">${t('select_panel')}</option>`;
 
   panels.forEach(panel => {
     const opt = document.createElement('option');
-    opt.value = JSON.stringify({ id: panel.id, dtb: panel.dtb });
+    opt.value = JSON.stringify({ id: panel.id, dtbo: panel.dtbo });
     opt.textContent = panel.name;
-    panelSelect.appendChild(opt);
+    target.appendChild(opt);
   });
 
-  selectedPanel = null;
+  if (target === panelSelect) selectedPanel = null;
 }
 
 panelSelect.addEventListener('change', () => {
@@ -161,6 +176,7 @@ panelSelect.addEventListener('change', () => {
 });
 
 function onPanelSelected() {
+  $('customization-section').style.display = '';
   diskSection.style.display = '';
   flashSection.style.display = '';
   refreshDisks();
@@ -265,7 +281,6 @@ $('btn-download').addEventListener('click', async () => {
     progressPercent.textContent = '100%';
     progressStage.textContent = '';
 
-    // Hide progress after a moment
     setTimeout(() => {
       if (!busy) progressSection.style.display = 'none';
     }, 2000);
@@ -320,9 +335,12 @@ async function startFlash() {
     await window.__TAURI__.core.invoke('flash_image', {
       imagePath: imagePath,
       device: selectedDisk,
-      panelDtb: selectedPanel.dtb,
-      panelId: selectedPanel.id,
+      panelDtbo: selectedPanel.dtbo,
       variant: selectedConsole,
+      rotation: parseInt($('rotation-select').value) || 0,
+      invertLeftStick: $('invert-lstick').checked,
+      invertRightStick: $('invert-rstick').checked,
+      hpInvert: $('hp-invert').checked,
     });
 
     progressFill.style.width = '100%';
@@ -348,6 +366,178 @@ window.__TAURI__.event.listen('flash-progress', (event) => {
   progressFill.style.width = percent.toFixed(1) + '%';
   progressPercent.textContent = percent.toFixed(0) + '%';
   progressStage.textContent = t(stage) || stage;
+});
+
+// ---------------------------------------------------------------------------
+// OVERLAY TAB
+// ---------------------------------------------------------------------------
+const overlaySdSelect = $('overlay-sd-select');
+const overlayPanelSelect = $('overlay-panel-select');
+const btnApplyOverlay = $('btn-apply-overlay');
+const overlayStatusEl = $('overlay-status');
+
+let overlayBootPath = null;
+let overlaySelectedPanel = null;
+let overlayConsole = null;
+
+// Scan for Arch R SD cards
+async function refreshOverlaySD() {
+  try {
+    const partitions = await window.__TAURI__.core.invoke('find_archr_sd');
+
+    overlaySdSelect.innerHTML = '';
+
+    if (partitions.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = t('overlay_no_sd');
+      opt.disabled = true;
+      overlaySdSelect.appendChild(opt);
+      overlayBootPath = null;
+      $('overlay-info-section').style.display = 'none';
+      $('overlay-panel-section').style.display = 'none';
+      $('overlay-customization-section').style.display = 'none';
+      $('overlay-apply-section').style.display = 'none';
+    } else {
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = t('select_sd');
+      overlaySdSelect.appendChild(placeholder);
+
+      partitions.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p;
+        opt.textContent = p;
+        overlaySdSelect.appendChild(opt);
+      });
+
+      // Auto-select if only one
+      if (partitions.length === 1) {
+        overlaySdSelect.value = partitions[0];
+        await onOverlaySDSelected(partitions[0]);
+      }
+    }
+  } catch (e) {
+    setOverlayStatus(t('error') + ': ' + e, 'error');
+  }
+}
+
+overlaySdSelect.addEventListener('change', async () => {
+  const val = overlaySdSelect.value;
+  if (val) {
+    await onOverlaySDSelected(val);
+  } else {
+    overlayBootPath = null;
+    $('overlay-info-section').style.display = 'none';
+    $('overlay-panel-section').style.display = 'none';
+    $('overlay-customization-section').style.display = 'none';
+    $('overlay-apply-section').style.display = 'none';
+  }
+});
+
+async function onOverlaySDSelected(bootPath) {
+  overlayBootPath = bootPath;
+
+  try {
+    const status = await window.__TAURI__.core.invoke('read_overlay', { bootPath });
+
+    if (!status.has_archr) {
+      setOverlayStatus(t('overlay_not_archr'), 'error');
+      return;
+    }
+
+    // Show current overlay info
+    $('overlay-current-name').textContent = status.current_panel_name || t('overlay_none');
+    $('overlay-current-file').textContent = status.current_overlay || t('overlay_none');
+    $('overlay-current-variant').textContent = status.variant || '—';
+    $('overlay-current-rotation').textContent = status.rotation + '°';
+    $('overlay-current-lstick').textContent = status.invert_left_stick ? 'Yes' : 'No';
+    $('overlay-current-rstick').textContent = status.invert_right_stick ? 'Yes' : 'No';
+    $('overlay-current-hp').textContent = status.hp_invert ? 'Yes' : 'No';
+    $('overlay-info-section').style.display = '';
+    $('overlay-panel-section').style.display = '';
+    $('overlay-customization-section').style.display = '';
+    $('overlay-apply-section').style.display = '';
+
+    // Pre-fill customization controls with current config
+    $('overlay-rotation-select').value = String(status.rotation || 0);
+    $('overlay-invert-lstick').checked = status.invert_left_stick || false;
+    $('overlay-invert-rstick').checked = status.invert_right_stick || false;
+    $('overlay-hp-invert').checked = status.hp_invert || false;
+
+    // Auto-select console based on variant
+    if (status.variant === 'original' || status.variant === 'clone') {
+      selectOverlayConsole(status.variant);
+    }
+
+    setOverlayStatus('', '');
+  } catch (e) {
+    setOverlayStatus(t('error') + ': ' + e, 'error');
+  }
+}
+
+$('btn-refresh-overlay-sd').addEventListener('click', refreshOverlaySD);
+
+// Overlay console selection
+function selectOverlayConsole(console) {
+  overlayConsole = console;
+  $('btn-overlay-original').classList.toggle('active', console === 'original');
+  $('btn-overlay-clone').classList.toggle('active', console === 'clone');
+  overlayPanelSelect.style.display = '';
+  overlaySelectedPanel = null;
+  btnApplyOverlay.disabled = true;
+  loadPanels(console, overlayPanelSelect);
+}
+
+$('btn-overlay-original').addEventListener('click', () => selectOverlayConsole('original'));
+$('btn-overlay-clone').addEventListener('click', () => selectOverlayConsole('clone'));
+
+overlayPanelSelect.addEventListener('change', () => {
+  if (overlayPanelSelect.value) {
+    overlaySelectedPanel = JSON.parse(overlayPanelSelect.value);
+    btnApplyOverlay.disabled = !overlayBootPath;
+  } else {
+    overlaySelectedPanel = null;
+    btnApplyOverlay.disabled = true;
+  }
+});
+
+// Apply overlay
+btnApplyOverlay.addEventListener('click', async () => {
+  if (!overlayBootPath || !overlaySelectedPanel || !overlayConsole) return;
+
+  btnApplyOverlay.disabled = true;
+  setOverlayStatus(t('overlay_applying'), '');
+
+  try {
+    await window.__TAURI__.core.invoke('apply_panel_with_config', {
+      bootPath: overlayBootPath,
+      panelDtbo: overlaySelectedPanel.dtbo,
+      variant: overlayConsole,
+      rotation: parseInt($('overlay-rotation-select').value) || 0,
+      invertLeftStick: $('overlay-invert-lstick').checked,
+      invertRightStick: $('overlay-invert-rstick').checked,
+      hpInvert: $('overlay-hp-invert').checked,
+    });
+
+    setOverlayStatus(t('overlay_applied'), 'success');
+
+    // Refresh current overlay info
+    await onOverlaySDSelected(overlayBootPath);
+  } catch (e) {
+    setOverlayStatus(t('error') + ': ' + e, 'error');
+    btnApplyOverlay.disabled = false;
+  }
+});
+
+function setOverlayStatus(text, type) {
+  overlayStatusEl.textContent = text;
+  overlayStatusEl.className = 'status' + (type ? ' ' + type : '');
+}
+
+// Auto-refresh overlay SD when switching to overlay tab
+$('tab-overlay').addEventListener('click', () => {
+  refreshOverlaySD();
 });
 
 // ---------------------------------------------------------------------------
@@ -380,13 +570,13 @@ function translateError(msg) {
     [/write error|flush error/i, 'error_write_failed'],
     [/cannot open image/i, 'error_open_image'],
     [/cannot write helper|cannot set script|cannot write params|cannot create temp/i, 'error_prepare_flash'],
-    [/dd error:/i, null],  // show raw dd error, don't hide behind generic message
+    [/dd error:/i, null],
     [/flash failed/i, 'error_flash_failed'],
     [/invalid device|invalid disk/i, 'error_invalid_device'],
   ];
   for (const [regex, key] of patterns) {
     if (regex.test(msg)) {
-      if (key === null) break;  // fall through to show raw error
+      if (key === null) break;
       return t(key);
     }
   }
@@ -398,7 +588,7 @@ function translateError(msg) {
 // ---------------------------------------------------------------------------
 async function init() {
   await initI18n();
-  checkForAppUpdate();  // fire-and-forget (check for flasher app update)
+  checkForAppUpdate();
 }
 
 async function checkForAppUpdate() {
