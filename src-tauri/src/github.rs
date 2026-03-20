@@ -59,13 +59,14 @@ pub async fn get_latest_release(variant: &str) -> Result<ReleaseInfo, String> {
         .map_err(|e| format!("JSON parse error: {}", e))?;
 
     // Match image by variant (all images include all panel DTBs):
-    //   original → ArchR-R36S-YYYYMMDD.img.xz
-    //   clone    → ArchR-R36S-clone-YYYYMMDD.img.xz
+    //   original → ArchR-R36S-YYYYMMDD.img.gz (or .img.xz)
+    //   clone    → ArchR-R36S-clone-YYYYMMDD.img.gz (or .img.xz)
     let asset = release
         .assets
         .iter()
         .find(|a| {
-            if !a.name.ends_with(".img.xz") {
+            let is_image = a.name.ends_with(".img.xz") || a.name.ends_with(".img.gz");
+            if !is_image {
                 return false;
             }
             match variant {

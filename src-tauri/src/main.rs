@@ -71,36 +71,50 @@ async fn flash_image(
 ) -> Result<String, String> {
     let app_clone = app.clone();
 
+    // Use app cache dir (user's data disk) instead of /tmp (OS disk, often small)
+    let cache_dir = app.path().app_cache_dir()
+        .map_err(|e| format!("Cache dir error: {}", e))?;
+
     tokio::task::spawn_blocking(move || {
         // 1. Determine decompressed image path (for reading DTBO from FAT32)
         let img_path = std::path::Path::new(&image_path);
 
         // 2. Read source DTBO from image
-        let dtbo_bytes = if image_path.ends_with(".xz") {
-            // For XZ images, the decompression happens inside flash_image_privileged.
-            // We need to decompress first to read the DTBO, but that's wasteful.
-            // Instead, read the DTBO from the temp decompressed image if it exists,
-            // or decompress just for DTBO extraction.
-            let temp_img = std::env::temp_dir().join("archr-flash-temp.img");
+        //    Compressed images (.xz, .gz) must be decompressed first to read FAT32.
+        let is_compressed = image_path.ends_with(".xz") || image_path.ends_with(".gz");
+        let dtbo_bytes = if is_compressed {
+            let _ = std::fs::create_dir_all(&cache_dir);
+            let temp_img = cache_dir.join("archr-flash-temp.img");
             if temp_img.exists() {
                 panel_config::read_dtbo_from_image(&temp_img, &panel_dtbo)?
             } else {
-                // Will be decompressed during flash — read from image directly
-                // XZ case: decompress to temp, read DTBO, then flash uses same temp
                 use std::io::{BufReader, Read, Write};
                 let src_file = std::fs::File::open(&image_path)
                     .map_err(|e| format!("Cannot open image: {}", e))?;
-                let mut decoder = xz2::read::XzDecoder::new(BufReader::new(src_file));
                 let mut dst_file = std::fs::File::create(&temp_img)
                     .map_err(|e| format!("Cannot create temp: {}", e))?;
                 let mut buf = vec![0u8; 4 * 1024 * 1024];
-                loop {
-                    let n = decoder.read(&mut buf)
-                        .map_err(|e| format!("Decompress error: {}", e))?;
-                    if n == 0 { break; }
-                    dst_file.write_all(&buf[..n])
-                        .map_err(|e| format!("Write error: {}", e))?;
+
+                if image_path.ends_with(".xz") {
+                    let mut decoder = xz2::read::XzDecoder::new(BufReader::new(src_file));
+                    loop {
+                        let n = decoder.read(&mut buf)
+                            .map_err(|e| format!("Decompress error: {}", e))?;
+                        if n == 0 { break; }
+                        dst_file.write_all(&buf[..n])
+                            .map_err(|e| format!("Write error: {}", e))?;
+                    }
+                } else {
+                    let mut decoder = flate2::read::GzDecoder::new(BufReader::new(src_file));
+                    loop {
+                        let n = decoder.read(&mut buf)
+                            .map_err(|e| format!("Decompress error: {}", e))?;
+                        if n == 0 { break; }
+                        dst_file.write_all(&buf[..n])
+                            .map_err(|e| format!("Write error: {}", e))?;
+                    }
                 }
+
                 dst_file.flush().map_err(|e| format!("Flush: {}", e))?;
                 panel_config::read_dtbo_from_image(&temp_img, &panel_dtbo)?
             }
@@ -128,17 +142,32 @@ async fn flash_image(
         // 4. Write to temp file
         let dtbo_path = panel_config::write_temp_dtbo(&final_dtbo)?;
 
+        // 5. Use decompressed image if we already created it (avoids double decompress)
+        let flash_image_path = if is_compressed {
+            let temp_img = cache_dir.join("archr-flash-temp.img");
+            if temp_img.exists() {
+                temp_img.to_string_lossy().to_string()
+            } else {
+                image_path.clone()
+            }
+        } else {
+            image_path.clone()
+        };
+
         // 6. Flash with privileged script
         flash::flash_image_privileged(
             &app_clone,
-            &image_path,
+            &flash_image_path,
             &device,
             dtbo_path.to_str().unwrap_or(""),
             &variant,
         )?;
 
-        // 7. Cleanup temp DTBO
+        // 7. Cleanup temp files
         let _ = std::fs::remove_file(&dtbo_path);
+        if is_compressed {
+            let _ = std::fs::remove_file(cache_dir.join("archr-flash-temp.img"));
+        }
 
         Ok("Flash complete".into())
     })
@@ -162,7 +191,7 @@ fn read_overlay(boot_path: &str) -> overlay::OverlayStatus {
 fn apply_panel_with_config(
     boot_path: &str,
     panel_dtbo: &str,
-    variant: &str,
+    _variant: &str,
     rotation: u32,
     invert_left_stick: bool,
     invert_right_stick: bool,

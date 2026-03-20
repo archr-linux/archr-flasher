@@ -7,17 +7,21 @@ pub struct Panel {
     pub dtbo: String,
 }
 
-/// Original R36S panels (8 panels).
+/// Original R36S panels (12 panels).
 /// DTBO names derived from DTS filenames in generate-panel-dtbos.sh.
 const PANELS_ORIGINAL: &[(&str, &str, &str)] = &[
-    ("0",    "Panel 0",          "panel0.dtbo"),
-    ("1",    "Panel 1",          "panel1.dtbo"),
-    ("2",    "Panel 2",          "panel2.dtbo"),
-    ("3",    "Panel 3",          "panel3.dtbo"),
-    ("4",    "Panel 4",          "panel4.dtbo"),
-    ("4v22", "Panel 4 V22",      "panel4-v22.dtbo"),
-    ("5",    "Panel 5",          "panel5.dtbo"),
-    ("r46h", "R46H (1024x768)",  "r46h.dtbo"),
+    ("0",          "Panel 0",              "panel0.dtbo"),
+    ("1",          "Panel 1",              "panel1.dtbo"),
+    ("2",          "Panel 2",              "panel2.dtbo"),
+    ("3",          "Panel 3",              "panel3.dtbo"),
+    ("4",          "Panel 4",              "panel4.dtbo"),
+    ("4v22",       "Panel 4 V22",          "panel4-v22.dtbo"),
+    ("5",          "Panel 5",              "panel5.dtbo"),
+    ("6",          "Panel 6",              "panel6.dtbo"),
+    ("r35s",       "R35S Rumble",          "r35s-rumble.dtbo"),
+    ("r36sp",      "R36S Plus",            "r36s-plus.dtbo"),
+    ("r46h",       "R46H (1024x768)",      "r46h.dtbo"),
+    ("rgb20s",     "RGB20S",               "rgb20s.dtbo"),
 ];
 
 /// Clone R36S panels (12 panels).

@@ -44,6 +44,7 @@ impl FdtBuilder {
         self.put_u32(val);
     }
 
+    #[allow(dead_code)]
     pub fn prop_str(&mut self, name: &str, val: &str) {
         let nameoff = self.intern_string(name);
         let data = val.as_bytes();
@@ -85,6 +86,7 @@ impl FdtBuilder {
     }
 
     /// Write an array of u32 values as a property.
+    #[allow(dead_code)]
     pub fn prop_u32_array(&mut self, name: &str, vals: &[u32]) {
         let nameoff = self.intern_string(name);
         let len = (vals.len() * 4) as u32;

@@ -211,45 +211,170 @@ fn clone_node_with_config(
 }
 
 /// Read a panel DTBO from inside a raw .img file (FAT32 BOOT partition).
-/// The BOOT partition starts at offset 16 MiB in our image layout.
+/// Uses a minimal FAT32 reader that tolerates BPB cluster-count ambiguity
+/// (the `fatfs` crate rejects valid FAT32 partitions with <65525 clusters).
 pub fn read_dtbo_from_image(image_path: &Path, panel_dtbo: &str) -> Result<Vec<u8>, String> {
-    use fscommon::StreamSlice;
-    use std::fs::File;
+    use std::io::{Read as _, Seek, SeekFrom};
 
-    let file = File::open(image_path)
+    let mut file = std::fs::File::open(image_path)
         .map_err(|e| format!("Cannot open image: {}", e))?;
-
     let file_len = file.metadata()
         .map_err(|e| format!("Metadata error: {}", e))?.len();
 
-    // BOOT partition starts at 16 MiB
     const BOOT_OFFSET: u64 = 16 * 1024 * 1024;
-    // BOOT partition is 256 MiB in our layout
-    const BOOT_SIZE: u64 = 256 * 1024 * 1024;
-
-    let end = (BOOT_OFFSET + BOOT_SIZE).min(file_len);
-    if end <= BOOT_OFFSET {
+    if file_len <= BOOT_OFFSET {
         return Err("Image too small — no BOOT partition".into());
     }
 
-    let slice = StreamSlice::new(file, BOOT_OFFSET, end)
-        .map_err(|e| format!("StreamSlice error: {}", e))?;
+    // Read BPB (BIOS Parameter Block) from boot sector
+    file.seek(SeekFrom::Start(BOOT_OFFSET))
+        .map_err(|e| format!("Seek error: {}", e))?;
+    let mut bpb = [0u8; 512];
+    file.read_exact(&mut bpb)
+        .map_err(|e| format!("Read BPB error: {}", e))?;
 
-    let fs = fatfs::FileSystem::new(slice, fatfs::FsOptions::new())
-        .map_err(|e| format!("FAT32 parse error: {}", e))?;
+    // Check boot sector signature
+    if bpb[510] != 0x55 || bpb[511] != 0xAA {
+        return Err("Invalid boot sector signature".into());
+    }
 
-    let root_dir = fs.root_dir();
-    let overlays_dir = root_dir.open_dir("overlays")
-        .map_err(|e| format!("Cannot open overlays/: {}", e))?;
+    let bytes_per_sector = u16::from_le_bytes([bpb[11], bpb[12]]) as u64;
+    let sectors_per_cluster = bpb[13] as u64;
+    let reserved_sectors = u16::from_le_bytes([bpb[14], bpb[15]]) as u64;
+    let num_fats = bpb[16] as u64;
+    let sectors_per_fat_32 = u32::from_le_bytes([bpb[36], bpb[37], bpb[38], bpb[39]]) as u64;
+    let root_cluster = u32::from_le_bytes([bpb[44], bpb[45], bpb[46], bpb[47]]);
 
-    let mut dtbo_file = overlays_dir.open_file(panel_dtbo)
-        .map_err(|e| format!("Cannot open overlays/{}: {}", panel_dtbo, e))?;
+    if bytes_per_sector == 0 || sectors_per_cluster == 0 || sectors_per_fat_32 == 0 {
+        return Err("Invalid FAT32 BPB parameters".into());
+    }
 
-    let mut buf = Vec::new();
-    dtbo_file.read_to_end(&mut buf)
-        .map_err(|e| format!("Read error: {}", e))?;
+    let cluster_size = bytes_per_sector * sectors_per_cluster;
+    let fat_start = BOOT_OFFSET + reserved_sectors * bytes_per_sector;
+    let data_start = fat_start + num_fats * sectors_per_fat_32 * bytes_per_sector;
 
-    Ok(buf)
+    let cluster_to_offset = |cluster: u32| -> u64 {
+        data_start + (cluster as u64 - 2) * cluster_size
+    };
+
+    // Read FAT entry for a given cluster
+    let read_fat_entry = |f: &mut std::fs::File, cluster: u32| -> Result<u32, String> {
+        let offset = fat_start + cluster as u64 * 4;
+        f.seek(SeekFrom::Start(offset)).map_err(|e| format!("FAT seek: {}", e))?;
+        let mut buf = [0u8; 4];
+        f.read_exact(&mut buf).map_err(|e| format!("FAT read: {}", e))?;
+        Ok(u32::from_le_bytes(buf) & 0x0FFFFFFF)
+    };
+
+    // Read all data for a cluster chain
+    let read_chain = |f: &mut std::fs::File, start_cluster: u32| -> Result<Vec<u8>, String> {
+        let mut data = Vec::new();
+        let mut cluster = start_cluster;
+        let mut buf = vec![0u8; cluster_size as usize];
+        loop {
+            if cluster < 2 || cluster >= 0x0FFFFFF8 { break; }
+            let offset = cluster_to_offset(cluster);
+            f.seek(SeekFrom::Start(offset)).map_err(|e| format!("Data seek: {}", e))?;
+            f.read_exact(&mut buf).map_err(|e| format!("Data read: {}", e))?;
+            data.extend_from_slice(&buf);
+            cluster = read_fat_entry(f, cluster)?;
+        }
+        Ok(data)
+    };
+
+    // Parse directory entries to find a named entry (case-insensitive 8.3 + LFN)
+    fn find_entry(dir_data: &[u8], name: &str) -> Option<(u32, u32, bool)> {
+        let name_upper = name.to_uppercase();
+        let mut lfn_buf = String::new();
+        let mut i = 0;
+        while i + 32 <= dir_data.len() {
+            let entry = &dir_data[i..i + 32];
+            if entry[0] == 0x00 { break; } // end of directory
+            if entry[0] == 0xE5 { i += 32; continue; } // deleted
+
+            // LFN entry (attr == 0x0F)
+            if entry[11] == 0x0F {
+                // Extract UCS-2 chars from LFN entry
+                let mut chars = Vec::new();
+                for &off in &[1,3,5,7,9, 14,16,18,20,22,24, 28,30] {
+                    if off + 1 < 32 {
+                        let c = u16::from_le_bytes([entry[off], entry[off + 1]]);
+                        if c == 0 || c == 0xFFFF { break; }
+                        if let Some(ch) = char::from_u32(c as u32) {
+                            chars.push(ch);
+                        }
+                    }
+                }
+                let seq = entry[0] & 0x1F;
+                if entry[0] & 0x40 != 0 {
+                    lfn_buf.clear();
+                }
+                // LFN entries are in reverse order; prepend
+                let part: String = chars.into_iter().collect();
+                lfn_buf = format!("{}{}", part, lfn_buf);
+                i += 32;
+                continue;
+            }
+
+            // Short name entry
+            let attr = entry[11];
+            let is_dir = attr & 0x10 != 0;
+            let cluster_hi = u16::from_le_bytes([entry[20], entry[21]]) as u32;
+            let cluster_lo = u16::from_le_bytes([entry[26], entry[27]]) as u32;
+            let cluster = (cluster_hi << 16) | cluster_lo;
+            let size = u32::from_le_bytes([entry[28], entry[29], entry[30], entry[31]]);
+
+            // Check LFN match first
+            if !lfn_buf.is_empty() && lfn_buf.eq_ignore_ascii_case(&name_upper) {
+                return Some((cluster, size, is_dir));
+            }
+
+            // Check 8.3 short name (8 bytes name + 3 bytes ext, space-padded)
+            let base: String = entry[0..8].iter()
+                .map(|&b| b as char)
+                .collect::<String>();
+            let ext: String = entry[8..11].iter()
+                .map(|&b| b as char)
+                .collect::<String>();
+            let base = base.trim();
+            let ext = ext.trim();
+            let short_name = if ext.is_empty() {
+                base.to_uppercase()
+            } else {
+                format!("{}.{}", base, ext).to_uppercase()
+            };
+            if short_name.eq_ignore_ascii_case(&name_upper) {
+                return Some((cluster, size, is_dir));
+            }
+
+            lfn_buf.clear();
+            i += 32;
+        }
+        None
+    }
+
+    // 1. Read root directory
+    let root_data = read_chain(&mut file, root_cluster)?;
+
+    // 2. Find "overlays" directory
+    let (overlays_cluster, _, is_dir) = find_entry(&root_data, "overlays")
+        .ok_or("overlays/ directory not found in boot partition")?;
+    if !is_dir {
+        return Err("overlays is not a directory".into());
+    }
+
+    // 3. Read overlays directory
+    let overlays_data = read_chain(&mut file, overlays_cluster)?;
+
+    // 4. Find the DTBO file
+    let (dtbo_cluster, dtbo_size, _) = find_entry(&overlays_data, panel_dtbo)
+        .ok_or_else(|| format!("overlays/{} not found", panel_dtbo))?;
+
+    // 5. Read DTBO data
+    let dtbo_data = read_chain(&mut file, dtbo_cluster)?;
+
+    // Trim to actual file size
+    Ok(dtbo_data[..dtbo_size as usize].to_vec())
 }
 
 /// Write a custom DTBO to a temp file and return its path.

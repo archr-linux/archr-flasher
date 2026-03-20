@@ -128,17 +128,23 @@ pub fn flash_image_privileged(
     validate_device(device)?;
 
     let is_xz = image_path.ends_with(".xz");
+    let is_gz = image_path.ends_with(".gz") && !is_xz;
+    let needs_decompress = is_xz || is_gz;
 
     // Check temp space before decompression
-    if is_xz {
+    if needs_decompress {
         check_temp_space(image_path)?;
     }
 
-    // Step 1: Decompress .xz in user space (with progress)
-    let img_to_flash = if is_xz {
+    // Step 1: Decompress in user space (with progress)
+    let img_to_flash = if needs_decompress {
         emit_progress(app, 0.0, "decompressing");
         let temp_img = std::env::temp_dir().join("archr-flash-temp.img");
-        decompress_xz(app, image_path, &temp_img)?;
+        if is_xz {
+            decompress_xz(app, image_path, &temp_img)?;
+        } else {
+            decompress_gz(app, image_path, &temp_img)?;
+        }
         temp_img
     } else {
         PathBuf::from(image_path)
@@ -245,6 +251,37 @@ fn decompress_xz(app: &AppHandle, src: &str, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn decompress_gz(app: &AppHandle, src: &str, dst: &Path) -> Result<(), String> {
+    let src_file = File::open(src)
+        .map_err(|e| format!("Cannot open image: {}", e))?;
+    let src_size = src_file.metadata()
+        .map_err(|e| format!("Metadata error: {}", e))?.len();
+    let estimated_total = src_size * 3;
+
+    let mut decoder = flate2::read::GzDecoder::new(BufReader::new(src_file));
+    let mut dst_file = File::create(dst)
+        .map_err(|e| format!("Cannot create temp file: {}", e))?;
+
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    let mut written: u64 = 0;
+
+    loop {
+        let n = decoder.read(&mut buf)
+            .map_err(|e| format!("Decompress error: {}", e))?;
+        if n == 0 { break; }
+
+        dst_file.write_all(&buf[..n])
+            .map_err(|e| format!("Write error: {}", e))?;
+        written += n as u64;
+
+        let pct = (written as f64 / estimated_total as f64 * 55.0).min(55.0);
+        emit_progress(app, pct, "decompressing");
+    }
+
+    dst_file.flush().map_err(|e| format!("Flush error: {}", e))?;
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 const FLASH_SCRIPT: &str = r#"#!/bin/bash
 set -e
@@ -261,61 +298,101 @@ rm -f "$PROGRESS_FILE"
 echo "0" > "$PROGRESS_FILE"
 chmod 666 "$PROGRESS_FILE"
 
+unmount_all() {
+    for part in "${DEVICE}"*; do
+        [ -b "$part" ] || continue
+        udisksctl unmount -b "$part" --no-user-interaction 2>/dev/null || true
+        umount "$part" 2>/dev/null \
+            || umount -l "$part" 2>/dev/null \
+            || umount -f "$part" 2>/dev/null \
+            || true
+    done
+}
+
 # Aggressive unmount: udisksctl (tells desktop to release), then kernel umount
-for part in "${DEVICE}"*; do
-    [ -b "$part" ] || continue
-    udisksctl unmount -b "$part" --no-user-interaction 2>/dev/null || true
-    umount "$part" 2>/dev/null \
-        || umount -l "$part" 2>/dev/null \
-        || umount -f "$part" 2>/dev/null \
-        || true
-done
+unmount_all
 sleep 1
 
 # Flush kernel buffers and wipe FS signatures (prevents desktop auto-remount)
 blockdev --flushbufs "$DEVICE" 2>/dev/null || true
 wipefs -a "$DEVICE" 2>/dev/null || true
 
-# Write raw image (no O_DIRECT — not all readers support it)
-DD_ERR=$(mktemp)
-dd if="$IMAGE" of="$DEVICE" bs=4M conv=fsync status=none 2>"$DD_ERR" &
-DD_PID=$!
+# Write raw image with retry (SD cards can have transient I/O errors)
+DD_OK=0
+for attempt in 1 2 3; do
+    DD_ERR=$(mktemp)
+    dd if="$IMAGE" of="$DEVICE" bs=4M conv=fsync status=none 2>"$DD_ERR" &
+    DD_PID=$!
 
-# Monitor dd progress via /proc/fdinfo
-while kill -0 $DD_PID 2>/dev/null; do
-    sleep 1
-    if [ -f "/proc/$DD_PID/fdinfo/1" ]; then
-        POS=$(grep '^pos:' "/proc/$DD_PID/fdinfo/1" 2>/dev/null | awk '{print $2}')
-        if [ -n "$POS" ]; then
-            echo "$POS" > "$PROGRESS_FILE"
+    # Monitor dd progress via /proc/fdinfo
+    while kill -0 $DD_PID 2>/dev/null; do
+        sleep 1
+        if [ -f "/proc/$DD_PID/fdinfo/1" ]; then
+            POS=$(grep '^pos:' "/proc/$DD_PID/fdinfo/1" 2>/dev/null | awk '{print $2}')
+            if [ -n "$POS" ]; then
+                echo "$POS" > "$PROGRESS_FILE"
+            fi
         fi
+    done
+
+    if wait $DD_PID; then
+        DD_OK=1
+        rm -f "$DD_ERR"
+        break
+    fi
+
+    ERR=$(cat "$DD_ERR" 2>/dev/null)
+    rm -f "$DD_ERR"
+    if [ "$attempt" -lt 3 ]; then
+        sleep 2
+        # Re-unmount in case desktop auto-mounted during write
+        unmount_all
+        blockdev --flushbufs "$DEVICE" 2>/dev/null || true
+        echo "0" > "$PROGRESS_FILE"
+    else
+        echo "dd failed: $ERR" >&2
+        exit 1
     fi
 done
 
-if ! wait $DD_PID; then
-    ERR=$(cat "$DD_ERR" 2>/dev/null)
-    rm -f "$DD_ERR"
-    echo "dd failed: $ERR" >&2
-    exit 1
-fi
-rm -f "$DD_ERR"
-
 sync
 
-# Re-read partition table
-partprobe "$DEVICE" 2>/dev/null || true
-sleep 1
+# Re-read partition table with retry (kernel may be slow to update)
+for i in 1 2 3; do
+    partprobe "$DEVICE" 2>/dev/null || true
+    sleep 1
+    # Determine boot partition device name
+    if [[ "$DEVICE" == *mmcblk* ]] || [[ "$DEVICE" == *nvme* ]]; then
+        BOOT_PART="${DEVICE}p1"
+    else
+        BOOT_PART="${DEVICE}1"
+    fi
+    [ -b "$BOOT_PART" ] && break
+    sleep 2
+done
 
-# Determine boot partition device name
-if [[ "$DEVICE" == *mmcblk* ]] || [[ "$DEVICE" == *nvme* ]]; then
-    BOOT_PART="${DEVICE}p1"
-else
-    BOOT_PART="${DEVICE}1"
+if [ ! -b "$BOOT_PART" ]; then
+    echo "Boot partition $BOOT_PART not found after writing" >&2
+    exit 1
 fi
 
-# Mount boot partition
+# Mount boot partition with retry (may need time after partprobe)
 MOUNT_DIR=$(mktemp -d)
-mount "$BOOT_PART" "$MOUNT_DIR"
+MOUNTED=0
+for i in 1 2 3; do
+    if mount "$BOOT_PART" "$MOUNT_DIR" 2>/dev/null; then
+        MOUNTED=1
+        break
+    fi
+    sleep 2
+    partprobe "$DEVICE" 2>/dev/null || true
+done
+
+if [ "$MOUNTED" -ne 1 ]; then
+    echo "Failed to mount boot partition $BOOT_PART" >&2
+    rmdir "$MOUNT_DIR" 2>/dev/null || true
+    exit 1
+fi
 
 # Copy custom DTBO as mipi-panel.dtbo
 if [ ! -f "$CUSTOM_DTBO" ]; then
@@ -324,7 +401,11 @@ if [ ! -f "$CUSTOM_DTBO" ]; then
     rmdir "$MOUNT_DIR" 2>/dev/null || true
     exit 1
 fi
+mkdir -p "$MOUNT_DIR/overlays"
 cp "$CUSTOM_DTBO" "$MOUNT_DIR/overlays/mipi-panel.dtbo"
+
+# Write variant file (original or clone)
+echo -n "$VARIANT" > "$MOUNT_DIR/variant"
 
 sync
 umount "$MOUNT_DIR"
@@ -351,17 +432,23 @@ pub fn flash_image_privileged(
     validate_device(device)?;
 
     let is_xz = image_path.ends_with(".xz");
+    let is_gz = image_path.ends_with(".gz") && !is_xz;
+    let needs_decompress = is_xz || is_gz;
 
     // Check temp space before decompression
-    if is_xz {
+    if needs_decompress {
         check_temp_space(image_path)?;
     }
 
-    // Step 1: Decompress .xz in user space (with progress)
-    let img_to_flash = if is_xz {
+    // Step 1: Decompress in user space (with progress)
+    let img_to_flash = if needs_decompress {
         emit_progress(app, 0.0, "decompressing");
         let temp_img = std::env::temp_dir().join("archr-flash-temp.img");
-        decompress_xz(app, image_path, &temp_img)?;
+        if is_xz {
+            decompress_xz(app, image_path, &temp_img)?;
+        } else {
+            decompress_gz(app, image_path, &temp_img)?;
+        }
         temp_img
     } else {
         PathBuf::from(image_path)
@@ -505,7 +592,11 @@ if [ ! -f "$CUSTOM_DTBO" ]; then
     diskutil eject "$DEVICE" 2>/dev/null || true
     exit 1
 fi
+mkdir -p "$BOOT_VOL/overlays"
 cp "$CUSTOM_DTBO" "$BOOT_VOL/overlays/mipi-panel.dtbo"
+
+# Write variant file
+echo -n "$VARIANT" > "$BOOT_VOL/variant"
 
 sync
 
@@ -726,10 +817,16 @@ try {{
 
     # Copy custom DTBO as mipi-panel.dtbo
     $overlayDir = Join-Path $bootDrive "overlays"
+    if (-not (Test-Path $overlayDir)) {{
+        New-Item -ItemType Directory -Path $overlayDir -Force | Out-Null
+    }}
     if (-not (Test-Path $CustomDTBO)) {{
         throw "Custom DTBO not found at $CustomDTBO"
     }}
     Copy-Item $CustomDTBO (Join-Path $overlayDir "mipi-panel.dtbo") -Force
+
+    # Write variant file
+    Set-Content -Path (Join-Path $bootDrive "variant") -Value $Variant -NoNewline
 
     exit 0
 }} catch {{

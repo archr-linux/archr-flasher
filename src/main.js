@@ -232,7 +232,7 @@ $('btn-select-file').addEventListener('click', async () => {
     const selected = await window.__TAURI__.dialog.open({
       filters: [{
         name: 'Arch R Image',
-        extensions: ['img', 'xz']
+        extensions: ['img', 'xz', 'gz']
       }]
     });
 
@@ -520,10 +520,9 @@ btnApplyOverlay.addEventListener('click', async () => {
       hpInvert: $('overlay-hp-invert').checked,
     });
 
-    setOverlayStatus(t('overlay_applied'), 'success');
-
-    // Refresh current overlay info
+    // Refresh current overlay info, then show success
     await onOverlaySDSelected(overlayBootPath);
+    setOverlayStatus(t('overlay_applied'), 'success');
   } catch (e) {
     setOverlayStatus(t('error') + ': ' + e, 'error');
     btnApplyOverlay.disabled = false;
