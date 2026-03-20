@@ -5,7 +5,7 @@
 // i18n
 // ---------------------------------------------------------------------------
 let lang = {};
-const SUPPORTED_LOCALES = ['en', 'pt-BR', 'es', 'zh'];
+const SUPPORTED_LOCALES = ['en', 'pt-BR', 'es', 'zh', 'ru'];
 
 async function initI18n() {
   try {
