@@ -1,6 +1,6 @@
 [package]
 name = "archr-flasher"
-version = "1.1.0"
+version = "1.1.1"
 description = "Arch R SD Card Flasher"
 authors = ["Arch R Linux"]
 edition = "2024"

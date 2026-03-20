@@ -58,9 +58,9 @@ pub async fn get_latest_release(variant: &str) -> Result<ReleaseInfo, String> {
         .await
         .map_err(|e| format!("JSON parse error: {}", e))?;
 
-    // Match image by variant (all images include all panel DTBs):
-    //   original → ArchR-R36S-YYYYMMDD.img.gz (or .img.xz)
-    //   clone    → ArchR-R36S-clone-YYYYMMDD.img.gz (or .img.xz)
+    // Match image by variant. Asset names may use either format:
+    //   v1: ArchR-R36S-YYYYMMDD.img.gz / ArchR-R36S-clone-YYYYMMDD.img.gz
+    //   v2: ArchR-R36S.aarch64-YYYYMMDD-original.img.gz / ...-clone.img.gz
     let asset = release
         .assets
         .iter()
@@ -69,9 +69,10 @@ pub async fn get_latest_release(variant: &str) -> Result<ReleaseInfo, String> {
             if !is_image {
                 return false;
             }
+            let name = &a.name;
             match variant {
-                "clone" => a.name.starts_with("ArchR-R36S-clone-"),
-                _ => a.name.starts_with("ArchR-R36S-") && !a.name.starts_with("ArchR-R36S-clone-"),
+                "clone" => name.contains("-clone"),
+                _ => name.starts_with("ArchR-R36S") && !name.contains("-clone"),
             }
         })
         .ok_or_else(|| format!("No image found for '{}' in latest release", variant))?;
