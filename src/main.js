@@ -1,5 +1,8 @@
-// Arch R Flasher — Frontend Logic
+// Arch R Flasher — Wizard Frontend
 // Tauri 2 IPC: all backend calls go through invoke()
+
+const $ = (id) => document.getElementById(id);
+const invoke = window.__TAURI__?.core?.invoke || (async () => {});
 
 // ---------------------------------------------------------------------------
 // i18n
@@ -9,542 +12,570 @@ const SUPPORTED_LOCALES = ['en', 'pt-BR', 'es', 'zh', 'ru'];
 
 async function initI18n() {
   try {
-    const osLocale = await window.__TAURI__.core.invoke('get_locale');
-    const normalized = osLocale.replace('_', '-');
+    const osLocale = await invoke('get_locale');
+    const normalized = (osLocale || 'en').replace('_', '-');
     let locale = SUPPORTED_LOCALES.find(l => normalized.startsWith(l));
     if (!locale) {
       const langPart = normalized.split('-')[0];
       locale = SUPPORTED_LOCALES.find(l => l.startsWith(langPart)) || 'en';
     }
-
     const resp = await fetch(`i18n/${locale}.json`);
     lang = await resp.json();
-  } catch (e) {
-    try {
-      const resp = await fetch('i18n/en.json');
-      lang = await resp.json();
-    } catch (_) {
-      lang = {};
-    }
+  } catch (_) {
+    try { const r = await fetch('i18n/en.json'); lang = await r.json(); } catch (_) {}
   }
-
   applyI18n();
 }
 
-function t(key, replacements) {
-  let text = lang[key] || key;
-  if (replacements) {
-    for (const [k, v] of Object.entries(replacements)) {
-      text = text.replace(`{${k}}`, v);
-    }
-  }
-  return text;
+function t(key, rep) {
+  let s = lang[key] || key;
+  if (rep) for (const [k, v] of Object.entries(rep)) s = s.replace(`{${k}}`, v);
+  return s;
 }
 
 function applyI18n() {
   document.querySelectorAll('[data-i18n]').forEach(el => {
-    const key = el.getAttribute('data-i18n');
-    if (lang[key]) el.textContent = lang[key];
+    const k = el.getAttribute('data-i18n');
+    if (lang[k]) el.textContent = lang[k];
   });
   document.querySelectorAll('[data-i18n-title]').forEach(el => {
-    const key = el.getAttribute('data-i18n-title');
-    if (lang[key]) el.title = lang[key];
+    const k = el.getAttribute('data-i18n-title');
+    if (lang[k]) el.title = lang[k];
   });
 }
-
-// ---------------------------------------------------------------------------
-// Tabs
-// ---------------------------------------------------------------------------
-document.querySelectorAll('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    if (busy) return;
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-    tab.classList.add('active');
-    const contentId = 'content-' + tab.id.replace('tab-', '');
-    document.getElementById(contentId).classList.add('active');
-  });
-});
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+let mode = 'flash';  // 'flash' or 'overlay'
+let currentStep = 0;
+let busy = false;
+
+// Flash state
 let selectedConsole = null;
 let selectedPanel = null;
 let selectedDisk = null;
 let imagePath = null;
-let busy = false;
+
+// Overlay state
+let overlayBootPath = null;
+let overlayConsole = null;
+let overlaySelectedPanel = null;
+
+const FLASH_STEPS = ['console', 'image', 'panel', 'customize', 'disk', 'flash'];
+const OVERLAY_STEPS = ['ovl-detect', 'ovl-panel', 'ovl-customize', 'ovl-apply'];
+
+const STEP_TITLES = {
+  'console': 'select_console', 'image': 'select_image', 'panel': 'select_panel_title',
+  'customize': 'step_customize', 'disk': 'select_sd_title', 'flash': 'step_flash',
+  'ovl-detect': 'overlay_sd', 'ovl-panel': 'overlay_new_panel',
+  'ovl-customize': 'step_customize', 'ovl-apply': 'step_apply',
+};
+
+function getSteps() { return mode === 'flash' ? FLASH_STEPS : OVERLAY_STEPS; }
+function getStepId() { return getSteps()[currentStep]; }
 
 // ---------------------------------------------------------------------------
-// DOM — Flash tab
+// Wizard navigation
 // ---------------------------------------------------------------------------
-const $ = (id) => document.getElementById(id);
-const btnOriginal = $('btn-original');
-const btnClone = $('btn-clone');
-const panelSection = $('panel-section');
-const panelSelect = $('panel-select');
-const diskSection = $('disk-section');
-const diskSelect = $('disk-select');
-const flashSection = $('flash-section');
-const btnFlash = $('btn-flash');
-const progressSection = $('progress-section');
-const progressFill = $('progress-fill');
-const progressPercent = $('progress-percent');
-const progressStage = $('progress-stage');
-const statusEl = $('status');
-const imageNameEl = $('image-name');
-const imageVersionEl = $('image-version');
-const confirmDialog = $('confirm-dialog');
-const confirmText = $('confirm-text');
-
-// ---------------------------------------------------------------------------
-// Busy state — disables all controls during operations
-// ---------------------------------------------------------------------------
-function setBusy(isBusy) {
-  busy = isBusy;
-  const controls = [
-    btnOriginal, btnClone, panelSelect, diskSelect,
-    $('btn-select-file'), $('btn-download'), $('btn-refresh-disks'),
-  ];
-  controls.forEach(el => { if (el) el.disabled = isBusy; });
-  document.querySelectorAll('.tab').forEach(t => t.disabled = isBusy);
-  updateFlashButton();
+function goToStep(idx) {
+  const steps = getSteps();
+  if (idx < 0 || idx >= steps.length) return;
+  currentStep = idx;
+  updateUI();
 }
 
-// ---------------------------------------------------------------------------
-// Console selection
-// ---------------------------------------------------------------------------
-function selectConsole(console) {
-  if (busy) return;
-  const changed = selectedConsole !== console;
-  selectedConsole = console;
-  selectedPanel = null;
+function nextStep() {
+  const steps = getSteps();
+  if (currentStep < steps.length - 1) {
+    // Execute step-specific actions before advancing
+    const stepId = getStepId();
+    if (mode === 'flash') {
+      if (stepId === 'panel') onPanelSelected();
+      if (stepId === 'disk') onDiskReady();
+    }
+    if (mode === 'overlay') {
+      if (stepId === 'ovl-customize') applyOverlay();
+    }
+    goToStep(currentStep + 1);
+  }
+}
 
-  btnOriginal.classList.toggle('active', console === 'original');
-  btnClone.classList.toggle('active', console === 'clone');
+function prevStep() {
+  if (currentStep > 0) goToStep(currentStep - 1);
+}
 
-  $('image-section').style.display = '';
+function updateUI() {
+  const steps = getSteps();
+  const stepId = getStepId();
+  const stepsNav = mode === 'flash' ? 'steps-flash' : 'steps-overlay';
 
-  if (changed && imagePath) {
-    imagePath = null;
-    imageNameEl.textContent = t('no_image');
-    imageNameEl.setAttribute('data-i18n', 'no_image');
-    imageNameEl.style.color = '';
-    imageVersionEl.textContent = '';
+  // Update sidebar steps
+  $('steps-flash').classList.toggle('hidden', mode !== 'flash');
+  $('steps-overlay').classList.toggle('hidden', mode !== 'overlay');
+
+  document.querySelectorAll(`#${stepsNav} .step`).forEach((el, i) => {
+    el.classList.toggle('active', i === currentStep);
+    el.classList.toggle('done', i < currentStep);
+  });
+
+  // Update main content
+  document.querySelectorAll('.step-content').forEach(el => el.classList.remove('active'));
+  const page = $('page-' + stepId);
+  if (page) page.classList.add('active');
+
+  // Update title
+  const titleKey = STEP_TITLES[stepId] || stepId;
+  $('step-title').textContent = t(titleKey);
+
+  // Update nav buttons
+  $('btn-back').classList.toggle('hidden', currentStep === 0);
+  updateNextButton();
+
+  // Mode tabs
+  $('mode-flash').classList.toggle('active', mode === 'flash');
+  $('mode-overlay').classList.toggle('active', mode === 'overlay');
+}
+
+function updateNextButton() {
+  const stepId = getStepId();
+  const btn = $('btn-next');
+
+  if (mode === 'flash') {
+    switch (stepId) {
+      case 'console': btn.disabled = !selectedConsole; break;
+      case 'image': btn.disabled = !imagePath; break;
+      case 'panel': btn.disabled = !selectedPanel; break;
+      case 'customize': btn.disabled = false; break;
+      case 'disk': btn.disabled = !selectedDisk; break;
+      case 'flash':
+        btn.textContent = t('flash');
+        btn.disabled = busy;
+        break;
+      default: btn.disabled = false;
+    }
+  } else {
+    switch (stepId) {
+      case 'ovl-detect': btn.disabled = !overlayBootPath; break;
+      case 'ovl-panel': btn.disabled = !overlaySelectedPanel; break;
+      case 'ovl-customize': btn.disabled = false; break;
+      case 'ovl-apply':
+        btn.textContent = t('overlay_apply');
+        btn.disabled = busy;
+        break;
+      default: btn.disabled = false;
+    }
   }
 
-  loadPanels(console);
-  panelSection.style.display = '';
-  $('customization-section').style.display = 'none';
-  diskSection.style.display = 'none';
-  flashSection.style.display = 'none';
-  updateFlashButton();
+  // Last step: change button text
+  const steps = getSteps();
+  if (currentStep === steps.length - 1) {
+    if (mode === 'flash') btn.textContent = t('flash') || 'FLASH';
+    else btn.textContent = t('overlay_apply') || 'APPLY';
+  } else {
+    btn.textContent = t('next') || 'NEXT';
+  }
 }
 
-btnOriginal.addEventListener('click', () => selectConsole('original'));
-btnClone.addEventListener('click', () => selectConsole('clone'));
+// ---------------------------------------------------------------------------
+// Mode switching
+// ---------------------------------------------------------------------------
+$('mode-flash').addEventListener('click', () => {
+  if (busy) return;
+  mode = 'flash';
+  currentStep = 0;
+  updateUI();
+});
+
+$('mode-overlay').addEventListener('click', () => {
+  if (busy) return;
+  mode = 'overlay';
+  currentStep = 0;
+  updateUI();
+  refreshOverlaySD();
+});
+
+// ---------------------------------------------------------------------------
+// Nav buttons
+// ---------------------------------------------------------------------------
+$('btn-back').addEventListener('click', () => { if (!busy) prevStep(); });
+
+$('btn-next').addEventListener('click', () => {
+  if (busy) return;
+  const steps = getSteps();
+  if (currentStep === steps.length - 1) {
+    // Last step action
+    if (mode === 'flash') showFlashConfirm();
+    else applyOverlay();
+  } else {
+    nextStep();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Console selection (Flash step 1)
+// ---------------------------------------------------------------------------
+document.querySelectorAll('#page-console .card').forEach(card => {
+  card.addEventListener('click', () => {
+    if (busy) return;
+    const console = card.dataset.console;
+    const changed = selectedConsole !== console;
+    selectedConsole = console;
+
+    document.querySelectorAll('#page-console .card').forEach(c => c.classList.remove('active'));
+    card.classList.add('active');
+
+    if (changed) {
+      imagePath = null;
+      $('image-name').textContent = t('no_image');
+      $('image-version').textContent = '';
+      selectedPanel = null;
+    }
+
+    loadPanels(console, $('panel-select'));
+    updateNextButton();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Panel loading
 // ---------------------------------------------------------------------------
 async function loadPanels(console, selectEl) {
-  const target = selectEl || panelSelect;
-  const panels = await window.__TAURI__.core.invoke('get_panels', { console });
-
-  target.innerHTML = `<option value="">${t('select_panel')}</option>`;
-
-  panels.forEach(panel => {
-    const opt = document.createElement('option');
-    opt.value = JSON.stringify({ id: panel.id, dtbo: panel.dtbo });
-    opt.textContent = panel.name;
-    target.appendChild(opt);
-  });
-
-  if (target === panelSelect) selectedPanel = null;
-}
-
-panelSelect.addEventListener('change', () => {
-  if (panelSelect.value) {
-    selectedPanel = JSON.parse(panelSelect.value);
-    onPanelSelected();
-  } else {
-    selectedPanel = null;
-    diskSection.style.display = 'none';
-    flashSection.style.display = 'none';
-  }
-  updateFlashButton();
-});
-
-function onPanelSelected() {
-  $('customization-section').style.display = '';
-  diskSection.style.display = '';
-  flashSection.style.display = '';
-  refreshDisks();
-}
-
-// ---------------------------------------------------------------------------
-// Disk listing
-// ---------------------------------------------------------------------------
-async function refreshDisks() {
-  const disks = await window.__TAURI__.core.invoke('list_disks');
-
-  diskSelect.innerHTML = `<option value="">${t('select_sd')}</option>`;
-  selectedDisk = null;
-
-  if (disks.length === 0) {
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = t('no_sd');
-    opt.disabled = true;
-    diskSelect.appendChild(opt);
-  } else {
-    disks.forEach(disk => {
+  try {
+    const panels = await invoke('get_panels', { console });
+    selectEl.innerHTML = `<option value="">${t('select_panel')}</option>`;
+    panels.forEach(p => {
       const opt = document.createElement('option');
-      opt.value = disk.device;
-      opt.textContent = disk.name;
-      diskSelect.appendChild(opt);
+      opt.value = JSON.stringify({ id: p.id, dtbo: p.dtbo });
+      opt.textContent = p.name;
+      selectEl.appendChild(opt);
     });
-  }
-
-  updateFlashButton();
+  } catch (_) {}
 }
 
-diskSelect.addEventListener('change', () => {
-  selectedDisk = diskSelect.value || null;
-  updateFlashButton();
+// Flash panel select
+$('panel-select').addEventListener('change', () => {
+  const val = $('panel-select').value;
+  selectedPanel = val ? JSON.parse(val) : null;
+  updateNextButton();
 });
 
-$('btn-refresh-disks').addEventListener('click', refreshDisks);
-
 // ---------------------------------------------------------------------------
-// Flash button state
-// ---------------------------------------------------------------------------
-function updateFlashButton() {
-  btnFlash.disabled = busy || !(imagePath && selectedConsole && selectedPanel && selectedDisk);
-}
-
-// ---------------------------------------------------------------------------
-// File selection (local file picker)
+// Image selection
 // ---------------------------------------------------------------------------
 $('btn-select-file').addEventListener('click', async () => {
   if (busy) return;
   try {
     const selected = await window.__TAURI__.dialog.open({
-      filters: [{
-        name: 'Arch R Image',
-        extensions: ['img', 'xz', 'gz']
-      }]
+      filters: [{ name: 'Arch R Image', extensions: ['img', 'xz', 'gz'] }]
     });
-
     if (selected) {
       imagePath = selected;
-      const fileName = selected.split(/[/\\]/).pop();
-      imageNameEl.textContent = fileName;
-      imageNameEl.removeAttribute('data-i18n');
-      imageNameEl.style.color = 'var(--text)';
-      imageVersionEl.textContent = '';
-      updateFlashButton();
+      $('image-name').textContent = selected.split(/[/\\]/).pop();
+      $('image-name').style.color = 'var(--text)';
+      $('image-version').textContent = '';
+      updateNextButton();
     }
-  } catch (e) {
-    setStatus(t('error_select_file') + e, 'error');
-  }
+  } catch (e) { setFlashStatus(t('error') + ': ' + e, 'error'); }
 });
 
-// ---------------------------------------------------------------------------
-// Download latest (in-app download with progress)
-// ---------------------------------------------------------------------------
 $('btn-download').addEventListener('click', async () => {
   if (busy) return;
   setBusy(true);
-  progressSection.style.display = '';
-  progressFill.style.width = '0%';
-  progressPercent.textContent = '0%';
-  progressStage.textContent = t('checking_version');
-  setStatus(t('checking_version'), '');
+  const dlProg = $('download-progress');
+  dlProg.classList.remove('hidden');
+  $('dl-progress-fill').style.width = '0%';
+  $('dl-progress-text').textContent = '0%';
 
   try {
-    const result = await window.__TAURI__.core.invoke('download_image', { variant: selectedConsole });
-
+    // Soysauce uses original image
+    const variant = selectedConsole === 'soysauce' ? 'original' : selectedConsole;
+    const result = await invoke('download_image', { variant });
     imagePath = result.path;
-    imageNameEl.textContent = result.image_name;
-    imageNameEl.removeAttribute('data-i18n');
-    imageNameEl.style.color = 'var(--text)';
-    imageVersionEl.textContent = result.version;
-
-    if (result.cached) {
-      setStatus(t('cached'), 'success');
-    } else {
-      setStatus(t('download_complete'), 'success');
-    }
-
-    progressFill.style.width = '100%';
-    progressPercent.textContent = '100%';
-    progressStage.textContent = '';
-
-    setTimeout(() => {
-      if (!busy) progressSection.style.display = 'none';
-    }, 2000);
+    $('image-name').textContent = result.image_name;
+    $('image-name').style.color = 'var(--text)';
+    $('image-version').textContent = result.version;
+    $('dl-progress-fill').style.width = '100%';
+    $('dl-progress-text').textContent = '100%';
+    setTimeout(() => dlProg.classList.add('hidden'), 2000);
   } catch (e) {
-    setStatus(translateError(e), 'error');
-    progressSection.style.display = 'none';
+    setFlashStatus(translateError(e), 'error');
+    dlProg.classList.add('hidden');
   }
-
   setBusy(false);
-  updateFlashButton();
+  updateNextButton();
 });
 
-// Download progress listener
-window.__TAURI__.event.listen('download-progress', (event) => {
+window.__TAURI__?.event?.listen('download-progress', (event) => {
   const { percent, downloaded_bytes, total_bytes } = event.payload;
-  progressFill.style.width = percent.toFixed(1) + '%';
-  progressPercent.textContent = percent.toFixed(0) + '%';
-
-  const dl = formatBytes(downloaded_bytes);
-  const tot = formatBytes(total_bytes);
-  progressStage.textContent = `${t('downloading')} ${dl} / ${tot}`;
+  $('dl-progress-fill').style.width = percent.toFixed(1) + '%';
+  $('dl-progress-text').textContent = percent.toFixed(0) + '%';
 });
 
 // ---------------------------------------------------------------------------
-// Flash
+// Disk selection (Flash step 5)
 // ---------------------------------------------------------------------------
-$('btn-flash').addEventListener('click', () => {
-  if (busy) return;
-  const diskName = diskSelect.options[diskSelect.selectedIndex].textContent;
-  confirmText.textContent = t('confirm_text', { disk: diskName });
-  confirmDialog.style.display = '';
+async function refreshDisks() {
+  try {
+    const disks = await invoke('list_disks');
+    const sel = $('disk-select');
+    sel.innerHTML = `<option value="">${t('select_sd')}</option>`;
+    selectedDisk = null;
+    disks.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.device;
+      opt.textContent = d.name;
+      sel.appendChild(opt);
+    });
+  } catch (_) {}
+  updateNextButton();
+}
+
+$('disk-select').addEventListener('change', () => {
+  selectedDisk = $('disk-select').value || null;
+  updateNextButton();
 });
 
-$('btn-cancel').addEventListener('click', () => {
-  confirmDialog.style.display = 'none';
-});
+$('btn-refresh-disks').addEventListener('click', refreshDisks);
+
+function onPanelSelected() { refreshDisks(); }
+function onDiskReady() { buildFlashSummary(); }
+
+// ---------------------------------------------------------------------------
+// Flash summary & execution
+// ---------------------------------------------------------------------------
+function buildFlashSummary() {
+  const panelName = selectedPanel ? $('panel-select').options[$('panel-select').selectedIndex].textContent : t('overlay_none');
+  const diskName = selectedDisk ? $('disk-select').options[$('disk-select').selectedIndex].textContent : t('overlay_none');
+  const imgName = $('image-name').textContent;
+  $('flash-summary').innerHTML = `
+    <strong>${t('console')}:</strong> ${selectedConsole}<br>
+    <strong>${t('step_image')}:</strong> ${imgName}<br>
+    <strong>${t('step_panel')}:</strong> ${panelName}<br>
+    <strong>${t('rotation')}:</strong> ${$('rotation-select').value}°<br>
+    <strong>${t('step_disk')}:</strong> ${diskName}
+  `;
+}
+
+function showFlashConfirm() {
+  buildFlashSummary();
+  const diskName = $('disk-select').options[$('disk-select').selectedIndex]?.textContent || selectedDisk;
+  $('confirm-text').textContent = t('confirm_text', { disk: diskName });
+  $('confirm-dialog').classList.remove('hidden');
+}
+
+$('btn-cancel').addEventListener('click', () => $('confirm-dialog').classList.add('hidden'));
 
 $('btn-confirm').addEventListener('click', async () => {
-  confirmDialog.style.display = 'none';
+  $('confirm-dialog').classList.add('hidden');
   await startFlash();
 });
 
 async function startFlash() {
   setBusy(true);
-  progressSection.style.display = '';
-  progressFill.style.width = '0%';
-  progressPercent.textContent = '0%';
-  progressStage.textContent = t('writing');
-  setStatus(t('writing'), '');
+  $('flash-progress').classList.remove('hidden');
+  $('progress-fill').style.width = '0%';
+  $('progress-percent').textContent = '0%';
+  $('progress-stage').textContent = t('writing');
+  setFlashStatus(t('writing'), '');
 
   try {
-    await window.__TAURI__.core.invoke('flash_image', {
-      imagePath: imagePath,
-      device: selectedDisk,
-      panelDtbo: selectedPanel.dtbo,
-      variant: selectedConsole,
+    const variant = selectedConsole === 'soysauce' ? 'original' : selectedConsole;
+    await invoke('flash_image', {
+      imagePath, device: selectedDisk,
+      panelDtbo: selectedPanel.dtbo, variant,
       rotation: parseInt($('rotation-select').value) || 0,
       invertLeftStick: $('invert-lstick').checked,
       invertRightStick: $('invert-rstick').checked,
       hpInvert: $('hp-invert').checked,
     });
-
-    progressFill.style.width = '100%';
-    progressPercent.textContent = '100%';
-    progressStage.textContent = '';
-    setStatus(t('done'), 'success');
+    $('progress-fill').style.width = '100%';
+    $('progress-percent').textContent = '100%';
+    $('progress-stage').textContent = '';
+    setFlashStatus(t('done'), 'success');
   } catch (e) {
     const msg = typeof e === 'string' ? e : String(e);
-    if (msg === 'cancelled') {
-      setStatus(t('flash_cancelled'), '');
-    } else {
-      setStatus(translateError(msg), 'error');
-    }
-    progressSection.style.display = 'none';
+    if (msg === 'cancelled') setFlashStatus(t('flash_cancelled'), '');
+    else setFlashStatus(translateError(msg), 'error');
   }
-
   setBusy(false);
 }
 
-// Flash progress listener
-window.__TAURI__.event.listen('flash-progress', (event) => {
+window.__TAURI__?.event?.listen('flash-progress', (event) => {
   const { percent, stage } = event.payload;
-  progressFill.style.width = percent.toFixed(1) + '%';
-  progressPercent.textContent = percent.toFixed(0) + '%';
-  progressStage.textContent = t(stage) || stage;
+  $('progress-fill').style.width = percent.toFixed(1) + '%';
+  $('progress-percent').textContent = percent.toFixed(0) + '%';
+  $('progress-stage').textContent = t(stage) || stage;
 });
 
 // ---------------------------------------------------------------------------
-// OVERLAY TAB
+// OVERLAY MODE
 // ---------------------------------------------------------------------------
-const overlaySdSelect = $('overlay-sd-select');
-const overlayPanelSelect = $('overlay-panel-select');
-const btnApplyOverlay = $('btn-apply-overlay');
-const overlayStatusEl = $('overlay-status');
 
-let overlayBootPath = null;
-let overlaySelectedPanel = null;
-let overlayConsole = null;
-
-// Scan for Arch R SD cards
+// Overlay: Detect SD (step 1)
 async function refreshOverlaySD() {
   try {
-    const partitions = await window.__TAURI__.core.invoke('find_archr_sd');
+    const parts = await invoke('find_archr_sd');
+    const sel = $('overlay-sd-select');
+    sel.innerHTML = '';
+    overlayBootPath = null;
 
-    overlaySdSelect.innerHTML = '';
-
-    if (partitions.length === 0) {
+    if (parts.length === 0) {
       const opt = document.createElement('option');
       opt.value = '';
       opt.textContent = t('overlay_no_sd');
       opt.disabled = true;
-      overlaySdSelect.appendChild(opt);
-      overlayBootPath = null;
-      $('overlay-info-section').style.display = 'none';
-      $('overlay-panel-section').style.display = 'none';
-      $('overlay-customization-section').style.display = 'none';
-      $('overlay-apply-section').style.display = 'none';
+      sel.appendChild(opt);
     } else {
-      const placeholder = document.createElement('option');
-      placeholder.value = '';
-      placeholder.textContent = t('select_sd');
-      overlaySdSelect.appendChild(placeholder);
-
-      partitions.forEach(p => {
+      sel.innerHTML = `<option value="">${t('select_sd')}</option>`;
+      parts.forEach(p => {
         const opt = document.createElement('option');
-        opt.value = p;
-        opt.textContent = p;
-        overlaySdSelect.appendChild(opt);
+        opt.value = p; opt.textContent = p;
+        sel.appendChild(opt);
       });
-
-      // Auto-select if only one
-      if (partitions.length === 1) {
-        overlaySdSelect.value = partitions[0];
-        await onOverlaySDSelected(partitions[0]);
+      if (parts.length === 1) {
+        sel.value = parts[0];
+        await onOverlaySDSelected(parts[0]);
       }
     }
-  } catch (e) {
-    setOverlayStatus(t('error') + ': ' + e, 'error');
-  }
+  } catch (e) { setOverlayStatus(t('error') + ': ' + e, 'error'); }
+  updateNextButton();
 }
 
-overlaySdSelect.addEventListener('change', async () => {
-  const val = overlaySdSelect.value;
-  if (val) {
-    await onOverlaySDSelected(val);
-  } else {
-    overlayBootPath = null;
-    $('overlay-info-section').style.display = 'none';
-    $('overlay-panel-section').style.display = 'none';
-    $('overlay-customization-section').style.display = 'none';
-    $('overlay-apply-section').style.display = 'none';
-  }
+$('overlay-sd-select').addEventListener('change', async () => {
+  const val = $('overlay-sd-select').value;
+  if (val) await onOverlaySDSelected(val);
+  else { overlayBootPath = null; $('overlay-current-info').classList.add('hidden'); }
+  updateNextButton();
 });
 
 async function onOverlaySDSelected(bootPath) {
   overlayBootPath = bootPath;
-
   try {
-    const status = await window.__TAURI__.core.invoke('read_overlay', { bootPath });
+    const s = await invoke('read_overlay', { bootPath });
+    if (!s.has_archr) { setOverlayStatus(t('overlay_not_archr'), 'error'); return; }
 
-    if (!status.has_archr) {
-      setOverlayStatus(t('overlay_not_archr'), 'error');
-      return;
-    }
+    $('ovl-cur-name').textContent = s.current_panel_name || t('overlay_none');
+    $('ovl-cur-variant').textContent = s.variant || t('overlay_none');
+    $('ovl-cur-rotation').textContent = (s.rotation || 0) + '°';
+    $('ovl-cur-lstick').textContent = s.invert_left_stick ? t('yes') : t('no');
+    $('ovl-cur-rstick').textContent = s.invert_right_stick ? t('yes') : t('no');
+    $('ovl-cur-hp').textContent = s.hp_invert ? t('yes') : t('no');
+    $('overlay-current-info').classList.remove('hidden');
 
-    // Show current overlay info
-    $('overlay-current-name').textContent = status.current_panel_name || t('overlay_none');
-    $('overlay-current-file').textContent = status.current_overlay || t('overlay_none');
-    $('overlay-current-variant').textContent = status.variant || '—';
-    $('overlay-current-rotation').textContent = status.rotation + '°';
-    $('overlay-current-lstick').textContent = status.invert_left_stick ? 'Yes' : 'No';
-    $('overlay-current-rstick').textContent = status.invert_right_stick ? 'Yes' : 'No';
-    $('overlay-current-hp').textContent = status.hp_invert ? 'Yes' : 'No';
-    $('overlay-info-section').style.display = '';
-    $('overlay-panel-section').style.display = '';
-    $('overlay-customization-section').style.display = '';
-    $('overlay-apply-section').style.display = '';
+    // Pre-fill customize controls
+    $('overlay-rotation-select').value = String(s.rotation || 0);
+    $('overlay-invert-lstick').checked = s.invert_left_stick || false;
+    $('overlay-invert-rstick').checked = s.invert_right_stick || false;
+    $('overlay-hp-invert').checked = s.hp_invert || false;
 
-    // Pre-fill customization controls with current config
-    $('overlay-rotation-select').value = String(status.rotation || 0);
-    $('overlay-invert-lstick').checked = status.invert_left_stick || false;
-    $('overlay-invert-rstick').checked = status.invert_right_stick || false;
-    $('overlay-hp-invert').checked = status.hp_invert || false;
-
-    // Auto-select console based on variant
-    if (status.variant === 'original' || status.variant === 'clone') {
-      selectOverlayConsole(status.variant);
-    }
-
+    if (s.variant) selectOverlayConsole(s.variant);
     setOverlayStatus('', '');
-  } catch (e) {
-    setOverlayStatus(t('error') + ': ' + e, 'error');
-  }
+  } catch (e) { setOverlayStatus(t('error') + ': ' + e, 'error'); }
+  updateNextButton();
 }
 
 $('btn-refresh-overlay-sd').addEventListener('click', refreshOverlaySD);
 
-// Overlay console selection
-function selectOverlayConsole(console) {
-  overlayConsole = console;
-  $('btn-overlay-original').classList.toggle('active', console === 'original');
-  $('btn-overlay-clone').classList.toggle('active', console === 'clone');
-  overlayPanelSelect.style.display = '';
-  overlaySelectedPanel = null;
-  btnApplyOverlay.disabled = true;
-  loadPanels(console, overlayPanelSelect);
-}
-
-$('btn-overlay-original').addEventListener('click', () => selectOverlayConsole('original'));
-$('btn-overlay-clone').addEventListener('click', () => selectOverlayConsole('clone'));
-
-overlayPanelSelect.addEventListener('change', () => {
-  if (overlayPanelSelect.value) {
-    overlaySelectedPanel = JSON.parse(overlayPanelSelect.value);
-    btnApplyOverlay.disabled = !overlayBootPath;
-  } else {
-    overlaySelectedPanel = null;
-    btnApplyOverlay.disabled = true;
-  }
+// Overlay: Panel selection (step 2)
+document.querySelectorAll('#page-ovl-panel .card').forEach(card => {
+  card.addEventListener('click', () => {
+    if (busy) return;
+    const con = card.dataset.console;
+    selectOverlayConsole(con);
+  });
 });
 
-// Apply overlay
-btnApplyOverlay.addEventListener('click', async () => {
-  if (!overlayBootPath || !overlaySelectedPanel || !overlayConsole) return;
+function selectOverlayConsole(con) {
+  overlayConsole = con;
+  document.querySelectorAll('#page-ovl-panel .card').forEach(c =>
+    c.classList.toggle('active', c.dataset.console === con)
+  );
+  overlaySelectedPanel = null;
+  loadPanels(con, $('overlay-panel-select'));
+  updateNextButton();
+}
 
-  btnApplyOverlay.disabled = true;
+$('overlay-panel-select').addEventListener('change', () => {
+  const val = $('overlay-panel-select').value;
+  overlaySelectedPanel = val ? JSON.parse(val) : null;
+  updateNextButton();
+});
+
+// Overlay: Apply (step 4)
+async function applyOverlay() {
+  if (!overlayBootPath || !overlaySelectedPanel) return;
+  setBusy(true);
   setOverlayStatus(t('overlay_applying'), '');
 
   try {
-    await window.__TAURI__.core.invoke('apply_panel_with_config', {
+    await invoke('apply_panel_with_config', {
       bootPath: overlayBootPath,
       panelDtbo: overlaySelectedPanel.dtbo,
-      variant: overlayConsole,
+      variant: overlayConsole || 'original',
       rotation: parseInt($('overlay-rotation-select').value) || 0,
       invertLeftStick: $('overlay-invert-lstick').checked,
       invertRightStick: $('overlay-invert-rstick').checked,
       hpInvert: $('overlay-hp-invert').checked,
     });
 
-    // Refresh current overlay info, then show success
-    await onOverlaySDSelected(overlayBootPath);
+    buildOverlaySummary();
     setOverlayStatus(t('overlay_applied'), 'success');
-  } catch (e) {
-    setOverlayStatus(t('error') + ': ' + e, 'error');
-    btnApplyOverlay.disabled = false;
-  }
-});
-
-function setOverlayStatus(text, type) {
-  overlayStatusEl.textContent = text;
-  overlayStatusEl.className = 'status' + (type ? ' ' + type : '');
+  } catch (e) { setOverlayStatus(t('error') + ': ' + e, 'error'); }
+  setBusy(false);
 }
 
-// Auto-refresh overlay SD when switching to overlay tab
-$('tab-overlay').addEventListener('click', () => {
-  refreshOverlaySD();
+function buildOverlaySummary() {
+  const panelName = overlaySelectedPanel ? $('overlay-panel-select').options[$('overlay-panel-select').selectedIndex].textContent : t('overlay_none');
+  $('overlay-summary').innerHTML = `
+    <strong>${t('step_panel')}:</strong> ${panelName}<br>
+    <strong>${t('rotation')}:</strong> ${$('overlay-rotation-select').value}°<br>
+    <strong>${t('overlay_variant')}:</strong> ${overlayConsole || t('overlay_none')}
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Custom DTB (placeholder)
+// ---------------------------------------------------------------------------
+$('btn-custom-dtb')?.addEventListener('click', async () => {
+  try {
+    const selected = await window.__TAURI__.dialog.open({
+      filters: [{ name: 'Device Tree', extensions: ['dtb'] }]
+    });
+    if (selected) {
+      setFlashStatus(t('custom_dtb_selected', { file: selected.split(/[/\\]/).pop() }), '');
+    }
+  } catch (_) {}
+});
+
+$('btn-ovl-custom-dtb')?.addEventListener('click', async () => {
+  try {
+    const selected = await window.__TAURI__.dialog.open({
+      filters: [{ name: 'Device Tree', extensions: ['dtb'] }]
+    });
+    if (selected) {
+      setOverlayStatus(t('custom_dtb_selected', { file: selected.split(/[/\\]/).pop() }), '');
+    }
+  } catch (_) {}
 });
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function setStatus(text, type) {
-  statusEl.textContent = text;
-  statusEl.className = 'status' + (type ? ' ' + type : '');
+function setBusy(b) {
+  busy = b;
+  updateNextButton();
+  document.querySelectorAll('.mode-tab').forEach(t => t.disabled = b);
+}
+
+function setFlashStatus(text, type) {
+  $('flash-status').textContent = text;
+  $('flash-status').className = 'status' + (type ? ' ' + type : '');
+}
+
+function setOverlayStatus(text, type) {
+  $('overlay-status').textContent = text;
+  $('overlay-status').className = 'status' + (type ? ' ' + type : '');
 }
 
 function formatBytes(bytes) {
@@ -574,10 +605,7 @@ function translateError(msg) {
     [/invalid device|invalid disk/i, 'error_invalid_device'],
   ];
   for (const [regex, key] of patterns) {
-    if (regex.test(msg)) {
-      if (key === null) break;
-      return t(key);
-    }
+    if (regex.test(msg)) { if (key === null) break; return t(key); }
   }
   return t('error') + ': ' + msg;
 }
@@ -587,26 +615,18 @@ function translateError(msg) {
 // ---------------------------------------------------------------------------
 async function init() {
   await initI18n();
-  checkForAppUpdate();
-}
+  updateUI();
 
-async function checkForAppUpdate() {
   try {
-    const result = await window.__TAURI__.core.invoke('check_app_update');
-    if (!result) return;
-
-    const [version, ...rest] = result.split('|');
-    const yes = await window.__TAURI__.dialog.ask(
-      t('app_update_text', { version }),
-      { title: t('app_update_title'), kind: 'info' }
-    );
-    if (!yes) return;
-
-    setStatus(t('app_updating'), '');
-    await window.__TAURI__.core.invoke('install_app_update');
-  } catch (_) {
-    // offline or error — ignore silently
-  }
+    const result = await invoke('check_app_update');
+    if (result) {
+      const [version] = result.split('|');
+      const yes = await window.__TAURI__.dialog.ask(
+        t('app_update_text', { version }), { title: t('app_update_title'), kind: 'info' }
+      );
+      if (yes) { setFlashStatus(t('app_updating'), ''); await invoke('install_app_update'); }
+    }
+  } catch (_) {}
 }
 
 init();

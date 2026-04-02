@@ -7,246 +7,266 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="container">
-    <!-- Header -->
-    <header>
-      <h1><span class="arch">ARCH</span> <span class="r">R</span> <span class="flasher" data-i18n="title_flasher">FLASHER</span></h1>
-    </header>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="logo">
+        <span class="arch">ARCH</span> <span class="r">R</span>
+      </div>
 
-    <!-- Tab bar -->
-    <div class="tab-bar">
-      <button class="tab active" id="tab-flash" data-i18n="tab_flash">Flash</button>
-      <button class="tab" id="tab-overlay" data-i18n="tab_overlay">Overlay</button>
-    </div>
+      <!-- Mode selector -->
+      <div class="mode-tabs">
+        <button class="mode-tab active" id="mode-flash" data-i18n="tab_flash">Flash</button>
+        <button class="mode-tab" id="mode-overlay" data-i18n="tab_overlay">Overlay</button>
+      </div>
 
-    <!-- ==================== FLASH TAB ==================== -->
-    <div class="tab-content active" id="content-flash">
-
-      <!-- Console selection -->
-      <section class="section">
-        <label class="section-label" data-i18n="console">1. Console</label>
-        <div class="console-buttons">
-          <button class="console-btn" id="btn-original" data-console="original">
-            <strong data-i18n="original_name">R36S Original</strong>
-            <small data-i18n="original_desc">12 panels</small>
-          </button>
-          <button class="console-btn" id="btn-clone" data-console="clone">
-            <strong data-i18n="clone_name">R36S Clone</strong>
-            <small data-i18n="clone_desc">12 panels</small>
-          </button>
+      <!-- Flash steps -->
+      <nav class="steps" id="steps-flash">
+        <div class="step active" data-step="console">
+          <span class="step-num">1</span>
+          <span class="step-label" data-i18n="step_console">Console</span>
         </div>
-      </section>
-
-      <!-- Image selection -->
-      <section class="section" id="image-section" style="display: none;">
-        <label class="section-label" data-i18n="image">2. Image</label>
-        <div class="image-info" id="image-info">
-          <span id="image-name" data-i18n="no_image">No image selected</span>
-          <span id="image-version" class="tag"></span>
+        <div class="step" data-step="image">
+          <span class="step-num">2</span>
+          <span class="step-label" data-i18n="step_image">Image</span>
         </div>
-        <div class="image-actions">
-          <button class="btn-secondary" id="btn-select-file" data-i18n="select_file">Select file</button>
-          <button class="btn-secondary" id="btn-download" data-i18n="download_latest">Download latest version</button>
+        <div class="step" data-step="panel">
+          <span class="step-num">3</span>
+          <span class="step-label" data-i18n="step_panel">Panel</span>
         </div>
-      </section>
+        <div class="step" data-step="customize">
+          <span class="step-num">4</span>
+          <span class="step-label" data-i18n="step_customize">Customize</span>
+        </div>
+        <div class="step" data-step="disk">
+          <span class="step-num">5</span>
+          <span class="step-label" data-i18n="step_disk">SD Card</span>
+        </div>
+        <div class="step" data-step="flash">
+          <span class="step-num">6</span>
+          <span class="step-label" data-i18n="step_flash">Flash</span>
+        </div>
+      </nav>
 
-      <!-- Panel selection -->
-      <section class="section" id="panel-section" style="display: none;">
-        <label class="section-label" data-i18n="panel">3. Panel</label>
-        <select id="panel-select" class="select">
-          <option value="" data-i18n="select_panel">Select panel</option>
-        </select>
-      </section>
+      <!-- Overlay steps -->
+      <nav class="steps hidden" id="steps-overlay">
+        <div class="step active" data-step="ovl-detect">
+          <span class="step-num">1</span>
+          <span class="step-label" data-i18n="step_detect">Detect SD</span>
+        </div>
+        <div class="step" data-step="ovl-panel">
+          <span class="step-num">2</span>
+          <span class="step-label" data-i18n="step_panel">Panel</span>
+        </div>
+        <div class="step" data-step="ovl-customize">
+          <span class="step-num">3</span>
+          <span class="step-label" data-i18n="step_customize">Customize</span>
+        </div>
+        <div class="step" data-step="ovl-apply">
+          <span class="step-num">4</span>
+          <span class="step-label" data-i18n="step_apply">Apply</span>
+        </div>
+      </nav>
 
-      <!-- Customizations -->
-      <section class="section" id="customization-section" style="display: none;">
-        <label class="section-label" data-i18n="customizations">Customizations</label>
-        <div class="overlay-info">
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="rotation">Rotation</span>
-            <select id="rotation-select" class="select select-inline">
-              <option value="0">0°</option>
-              <option value="90">90°</option>
-              <option value="180">180°</option>
-              <option value="270">270°</option>
-            </select>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="invert_lstick">Invert left stick</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="invert-lstick">
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="invert_rstick">Invert right stick</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="invert-rstick">
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="hp_invert">Invert HP detect</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="hp-invert">
-              <span class="toggle-slider"></span>
-            </label>
+      <div class="sidebar-spacer"></div>
+      <div class="version" id="app-version"></div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <div class="main-header">
+        <h2 id="step-title" data-i18n="select_console">Select your console</h2>
+      </div>
+
+      <div class="main-body">
+
+        <!-- ===== FLASH STEPS ===== -->
+
+        <!-- Step: Console -->
+        <div class="step-content active" id="page-console">
+          <div class="card-grid">
+            <button class="card" data-console="original">
+              <strong data-i18n="original_name">R36S Original</strong>
+              <small data-i18n="original_desc">12 panels</small>
+            </button>
+            <button class="card" data-console="clone">
+              <strong data-i18n="clone_name">R36S Clone</strong>
+              <small data-i18n="clone_desc">12 panels</small>
+            </button>
+            <button class="card" data-console="soysauce">
+              <strong data-i18n="soysauce_name">R36S Soysauce</strong>
+              <small data-i18n="soysauce_desc">Y3506 - 7 panels</small>
+            </button>
           </div>
         </div>
-      </section>
 
-      <!-- Destination -->
-      <section class="section" id="disk-section" style="display: none;">
-        <label class="section-label" data-i18n="destination">4. Destination</label>
-        <div class="disk-row">
-          <select id="disk-select" class="select">
-            <option value="" data-i18n="select_sd">Select SD card</option>
+        <!-- Step: Image -->
+        <div class="step-content" id="page-image">
+          <div class="image-box" id="image-info">
+            <span id="image-name" data-i18n="no_image">No image selected</span>
+            <span id="image-version" class="tag"></span>
+          </div>
+          <div class="btn-row">
+            <button class="btn" id="btn-select-file" data-i18n="select_file">Select file</button>
+            <button class="btn" id="btn-download" data-i18n="download_latest">Download latest</button>
+          </div>
+          <div class="progress-inline hidden" id="download-progress">
+            <div class="progress-bar"><div class="progress-fill" id="dl-progress-fill"></div></div>
+            <span class="progress-label" id="dl-progress-text">0%</span>
+          </div>
+        </div>
+
+        <!-- Step: Panel -->
+        <div class="step-content" id="page-panel">
+          <select id="panel-select" class="select">
+            <option value="" data-i18n="select_panel">Select panel</option>
           </select>
-          <button class="btn-icon" id="btn-refresh-disks" data-i18n-title="refresh_tooltip" title="Refresh list">&#x21bb;</button>
-        </div>
-      </section>
+          <div class="hint" data-i18n="panel_hint">Choose the panel that matches your device screen.</div>
 
-      <!-- Flash button -->
-      <section class="section" id="flash-section" style="display: none;">
-        <button class="btn-flash" id="btn-flash" disabled data-i18n="flash">FLASH</button>
-      </section>
-
-      <!-- Progress -->
-      <section class="section" id="progress-section" style="display: none;">
-        <div class="progress-bar">
-          <div class="progress-fill" id="progress-fill"></div>
-        </div>
-        <div class="progress-text">
-          <span id="progress-percent">0%</span>
-          <span id="progress-stage"></span>
-        </div>
-      </section>
-
-      <!-- Status message -->
-      <div id="status" class="status"></div>
-    </div>
-
-    <!-- ==================== OVERLAY TAB ==================== -->
-    <div class="tab-content" id="content-overlay">
-
-      <!-- SD card detection -->
-      <section class="section">
-        <label class="section-label" data-i18n="overlay_sd">SD Card</label>
-        <div class="disk-row">
-          <select id="overlay-sd-select" class="select">
-            <option value="" data-i18n="overlay_no_sd">Insert an Arch R SD card</option>
-          </select>
-          <button class="btn-icon" id="btn-refresh-overlay-sd" title="Refresh">&#x21bb;</button>
-        </div>
-      </section>
-
-      <!-- Current overlay info -->
-      <section class="section" id="overlay-info-section" style="display: none;">
-        <label class="section-label" data-i18n="overlay_current">Current Panel</label>
-        <div class="overlay-info">
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="overlay_panel_name">Panel:</span>
-            <span id="overlay-current-name" class="overlay-value">—</span>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="overlay_overlay_file">Overlay:</span>
-            <span id="overlay-current-file" class="overlay-value">—</span>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="overlay_variant">Variant:</span>
-            <span id="overlay-current-variant" class="overlay-value">—</span>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="rotation">Rotation:</span>
-            <span id="overlay-current-rotation" class="overlay-value">0°</span>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="invert_lstick">L-stick inv.:</span>
-            <span id="overlay-current-lstick" class="overlay-value">—</span>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="invert_rstick">R-stick inv.:</span>
-            <span id="overlay-current-rstick" class="overlay-value">—</span>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="hp_invert">HP inv.:</span>
-            <span id="overlay-current-hp" class="overlay-value">—</span>
+          <div class="separator"></div>
+          <div class="custom-dtb-section">
+            <button class="btn btn-outline" id="btn-custom-dtb" data-i18n="custom_dtb">Generate from custom DTB...</button>
+            <small class="hint" data-i18n="custom_dtb_hint">Provide your own stock firmware DTB to generate an overlay.</small>
           </div>
         </div>
-      </section>
 
-      <!-- New panel selection -->
-      <section class="section" id="overlay-panel-section" style="display: none;">
-        <label class="section-label" data-i18n="overlay_new_panel">New Panel</label>
-        <div class="console-buttons" id="overlay-console-buttons">
-          <button class="console-btn" id="btn-overlay-original" data-console="original">
-            <strong data-i18n="original_name">R36S Original</strong>
-          </button>
-          <button class="console-btn" id="btn-overlay-clone" data-console="clone">
-            <strong data-i18n="clone_name">R36S Clone</strong>
-          </button>
+        <!-- Step: Customize -->
+        <div class="step-content" id="page-customize">
+          <div class="setting-group">
+            <div class="setting-row">
+              <span data-i18n="rotation">Rotation</span>
+              <select id="rotation-select" class="select-sm">
+                <option value="0">0°</option>
+                <option value="90">90°</option>
+                <option value="180">180°</option>
+                <option value="270">270°</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="invert_lstick">Invert left stick</span>
+              <label class="toggle"><input type="checkbox" id="invert-lstick"><span class="toggle-track"></span></label>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="invert_rstick">Invert right stick</span>
+              <label class="toggle"><input type="checkbox" id="invert-rstick"><span class="toggle-track"></span></label>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="hp_invert">Invert HP detect</span>
+              <label class="toggle"><input type="checkbox" id="hp-invert"><span class="toggle-track"></span></label>
+            </div>
+          </div>
         </div>
-        <select id="overlay-panel-select" class="select" style="margin-top: 10px; display: none;">
-          <option value="" data-i18n="select_panel">Select panel</option>
-        </select>
-      </section>
 
-      <!-- Overlay customizations -->
-      <section class="section" id="overlay-customization-section" style="display: none;">
-        <label class="section-label" data-i18n="customizations">Customizations</label>
-        <div class="overlay-info">
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="rotation">Rotation</span>
-            <select id="overlay-rotation-select" class="select select-inline">
-              <option value="0">0°</option>
-              <option value="90">90°</option>
-              <option value="180">180°</option>
-              <option value="270">270°</option>
+        <!-- Step: Disk -->
+        <div class="step-content" id="page-disk">
+          <div class="disk-row">
+            <select id="disk-select" class="select">
+              <option value="" data-i18n="select_sd">Select SD card</option>
             </select>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="invert_lstick">Invert left stick</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="overlay-invert-lstick">
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="invert_rstick">Invert right stick</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="overlay-invert-rstick">
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-          <div class="overlay-info-row">
-            <span class="overlay-label" data-i18n="hp_invert">Invert HP detect</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="overlay-hp-invert">
-              <span class="toggle-slider"></span>
-            </label>
+            <button class="btn-icon" id="btn-refresh-disks" title="Refresh">&#x21bb;</button>
           </div>
         </div>
-      </section>
 
-      <!-- Apply button -->
-      <section class="section" id="overlay-apply-section" style="display: none;">
-        <button class="btn-flash" id="btn-apply-overlay" disabled data-i18n="overlay_apply">APPLY</button>
-      </section>
+        <!-- Step: Flash -->
+        <div class="step-content" id="page-flash">
+          <div class="summary" id="flash-summary"></div>
+          <div class="progress-section hidden" id="flash-progress">
+            <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+            <div class="progress-info">
+              <span id="progress-percent">0%</span>
+              <span id="progress-stage"></span>
+            </div>
+          </div>
+          <div id="flash-status" class="status"></div>
+        </div>
 
-      <!-- Overlay status -->
-      <div id="overlay-status" class="status"></div>
-    </div>
+        <!-- ===== OVERLAY STEPS ===== -->
+
+        <!-- Overlay: Detect SD -->
+        <div class="step-content" id="page-ovl-detect">
+          <div class="disk-row">
+            <select id="overlay-sd-select" class="select">
+              <option value="" data-i18n="overlay_no_sd">Insert an Arch R SD card</option>
+            </select>
+            <button class="btn-icon" id="btn-refresh-overlay-sd" title="Refresh">&#x21bb;</button>
+          </div>
+          <div class="current-info hidden" id="overlay-current-info">
+            <div class="setting-row"><span data-i18n="overlay_panel_name">Panel</span><span id="ovl-cur-name" class="val">--</span></div>
+            <div class="setting-row"><span data-i18n="overlay_variant">Variant</span><span id="ovl-cur-variant" class="val">--</span></div>
+            <div class="setting-row"><span data-i18n="rotation">Rotation</span><span id="ovl-cur-rotation" class="val">0°</span></div>
+            <div class="setting-row"><span data-i18n="invert_lstick">L-stick inv.</span><span id="ovl-cur-lstick" class="val">--</span></div>
+            <div class="setting-row"><span data-i18n="invert_rstick">R-stick inv.</span><span id="ovl-cur-rstick" class="val">--</span></div>
+            <div class="setting-row"><span data-i18n="hp_invert">HP inv.</span><span id="ovl-cur-hp" class="val">--</span></div>
+          </div>
+        </div>
+
+        <!-- Overlay: Panel -->
+        <div class="step-content" id="page-ovl-panel">
+          <div class="card-grid compact">
+            <button class="card sm" data-console="original"><strong data-i18n="original_name">Original</strong></button>
+            <button class="card sm" data-console="clone"><strong data-i18n="clone_name">Clone</strong></button>
+            <button class="card sm" data-console="soysauce"><strong data-i18n="soysauce_name">Soysauce</strong></button>
+          </div>
+          <select id="overlay-panel-select" class="select" style="margin-top:12px;">
+            <option value="" data-i18n="select_panel">Select panel</option>
+          </select>
+
+          <div class="separator"></div>
+          <button class="btn btn-outline" id="btn-ovl-custom-dtb" data-i18n="custom_dtb">Generate from custom DTB...</button>
+        </div>
+
+        <!-- Overlay: Customize -->
+        <div class="step-content" id="page-ovl-customize">
+          <div class="setting-group">
+            <div class="setting-row">
+              <span data-i18n="rotation">Rotation</span>
+              <select id="overlay-rotation-select" class="select-sm">
+                <option value="0">0°</option>
+                <option value="90">90°</option>
+                <option value="180">180°</option>
+                <option value="270">270°</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="invert_lstick">Invert left stick</span>
+              <label class="toggle"><input type="checkbox" id="overlay-invert-lstick"><span class="toggle-track"></span></label>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="invert_rstick">Invert right stick</span>
+              <label class="toggle"><input type="checkbox" id="overlay-invert-rstick"><span class="toggle-track"></span></label>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="hp_invert">Invert HP detect</span>
+              <label class="toggle"><input type="checkbox" id="overlay-hp-invert"><span class="toggle-track"></span></label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Overlay: Apply -->
+        <div class="step-content" id="page-ovl-apply">
+          <div class="summary" id="overlay-summary"></div>
+          <div id="overlay-status" class="status"></div>
+        </div>
+      </div>
+
+      <!-- Bottom navigation -->
+      <div class="nav-bar">
+        <button class="btn btn-back hidden" id="btn-back" data-i18n="back">BACK</button>
+        <div class="nav-spacer"></div>
+        <button class="btn btn-next" id="btn-next" disabled data-i18n="next">NEXT</button>
+      </div>
+    </main>
   </div>
 
   <!-- Confirmation dialog -->
-  <div class="dialog-overlay" id="confirm-dialog" style="display: none;">
+  <div class="dialog-overlay hidden" id="confirm-dialog">
     <div class="dialog">
-      <h3 data-i18n="confirm_title">Confirm flash</h3>
+      <h3 data-i18n="confirm_title">Confirm</h3>
       <p id="confirm-text"></p>
       <p class="warning" data-i18n="confirm_warning">ALL DATA ON THE SD CARD WILL BE ERASED!</p>
       <div class="dialog-buttons">
-        <button class="btn-secondary" id="btn-cancel" data-i18n="cancel">Cancel</button>
-        <button class="btn-danger" id="btn-confirm" data-i18n="confirm">Flash</button>
+        <button class="btn" id="btn-cancel" data-i18n="cancel">Cancel</button>
+        <button class="btn btn-danger" id="btn-confirm" data-i18n="confirm">Flash</button>
       </div>
     </div>
   </div>
