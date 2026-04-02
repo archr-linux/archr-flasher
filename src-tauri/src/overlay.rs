@@ -196,10 +196,9 @@ fn identify_overlay(mipi_path: &Path) -> (Option<String>, Option<String>) {
         .collect();
 
     for panel in &all_panels {
-        // Check in overlays/ root and overlays/soysauce/ subdirectory
+        // Panel dtbo paths already include subdirectory (e.g. "soysauce/ss_v03.dtbo")
         let paths = [
             overlays_dir.join(&panel.dtbo),
-            overlays_dir.join("soysauce").join(&panel.dtbo),
         ];
         for dtbo_path in &paths {
             if let Ok(panel_data) = fs::read(dtbo_path) {
@@ -229,18 +228,11 @@ pub fn apply_overlay_with_config(
         return Err("Not an Arch R BOOT partition".to_string());
     }
 
-    // Search in overlays/ root and overlays/soysauce/ subdirectory
-    let source = {
-        let primary = boot.join("overlays").join(panel_dtbo);
-        let soysauce = boot.join("overlays/soysauce").join(panel_dtbo);
-        if primary.exists() {
-            primary
-        } else if soysauce.exists() {
-            soysauce
-        } else {
-            return Err(format!("Panel overlay not found: {}", panel_dtbo));
-        }
-    };
+    // Panel dtbo paths already include subdirectory (e.g. "soysauce/ss_v03.dtbo")
+    let source = boot.join("overlays").join(panel_dtbo);
+    if !source.exists() {
+        return Err(format!("Panel overlay not found: {}", panel_dtbo));
+    }
     let target = boot.join("overlays/mipi-panel.dtbo");
 
     let source_data = fs::read(&source)
