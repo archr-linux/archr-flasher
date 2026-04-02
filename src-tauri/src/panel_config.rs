@@ -104,18 +104,10 @@ pub fn extract_config(dtbo_bytes: &[u8]) -> PanelConfig {
     }
     config.invert_left_stick = has_prop(&fdt, "invert-absx");
     config.invert_right_stick = has_prop(&fdt, "invert-absrx");
-    config.hp_invert = has_prop(&fdt, "__fixups__")
-        || find_u32_prop(&fdt, "simple-audio-card,hp-det-gpio").is_some();
-
-    // Better HP invert detection: check if __fixups__ node exists
-    if let Some(root) = fdt.find_node("/") {
-        for child in root.children() {
-            if child.name == "__fixups__" {
-                config.hp_invert = true;
-                break;
-            }
-        }
-    }
+    // HP invert defaults to false. The checkbox means "flip polarity from overlay default".
+    // We can't know if the overlay polarity was already flipped without the original DTB,
+    // so default to false (use overlay as-is).
+    config.hp_invert = false;
 
     config
 }
@@ -146,15 +138,25 @@ fn clone_node_with_config(
     builder.begin_node(node.name);
 
     // Detect what kind of __overlay__ this is
+    // Panel overlay: has panel_description
     let has_panel_desc = node.property("panel_description").is_some();
-    let has_joypad_name = node.property("joypad-name").is_some();
+    // Joypad overlay: has compatible with "joypad" in name, or has io-channel-names,
+    // or has button-adc-scale (covers both DTS base and overlay fragments)
+    let has_joypad = node.property("joypad-name").is_some()
+        || node.property("button-adc-scale").is_some()
+        || node.property("io-channel-names").is_some()
+        || node.property("compatible").map_or(false, |p| {
+            std::str::from_utf8(p.value).unwrap_or("").contains("joypad")
+        });
+    // Audio HP detect: has the specific GPIO property (not just __fixups__)
     let has_hp_det = node.property("simple-audio-card,hp-det-gpio").is_some();
 
-    // Determine which properties to skip (will be written with new values)
+    // Determine which properties to override
     let override_rotation = has_panel_desc && config.rotation != 0;
-    let override_stick = has_joypad_name
-        && (config.invert_left_stick || config.invert_right_stick);
-    let override_hp = has_hp_det && config.hp_invert;
+    // For stick: always strip existing invert props on joypad nodes, then re-add based on config
+    let override_stick = has_joypad;
+    // For HP: always manage hp-det-gpio polarity when the property exists
+    let override_hp = has_hp_det;
 
     // Copy all properties, skipping ones we'll override
     for prop in node.properties() {
@@ -179,7 +181,7 @@ fn clone_node_with_config(
     if override_rotation {
         builder.prop_u32("rotation", config.rotation);
     }
-    if has_joypad_name {
+    if has_joypad {
         if config.invert_left_stick {
             builder.prop_u32("invert-absx", 1);
             builder.prop_u32("invert-absy", 1);
@@ -190,14 +192,19 @@ fn clone_node_with_config(
         }
     }
     if override_hp {
-        // Flip polarity: [phandle, pin, flags] → toggle flags (0↔1)
         if let Some(prop) = node.property("simple-audio-card,hp-det-gpio") {
             if prop.value.len() >= 12 {
-                let mut data = prop.value.to_vec();
-                let flags = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
-                let new_flags = if flags == 0 { 1u32 } else { 0u32 };
-                data[8..12].copy_from_slice(&new_flags.to_be_bytes());
-                builder.prop_bytes("simple-audio-card,hp-det-gpio", &data);
+                if config.hp_invert {
+                    // Flip polarity: [phandle, pin, flags] → toggle flags (0↔1)
+                    let mut data = prop.value.to_vec();
+                    let flags = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+                    let new_flags = if flags == 0 { 1u32 } else { 0u32 };
+                    data[8..12].copy_from_slice(&new_flags.to_be_bytes());
+                    builder.prop_bytes("simple-audio-card,hp-det-gpio", &data);
+                } else {
+                    // Keep original polarity
+                    builder.prop_bytes("simple-audio-card,hp-det-gpio", prop.value);
+                }
             }
         }
     }
