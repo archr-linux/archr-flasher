@@ -188,19 +188,26 @@ fn identify_overlay(mipi_path: &Path) -> (Option<String>, Option<String>) {
         None => return (Some(mipi_desc_hash), None),
     };
 
-    // Check all known panels from both sets
+    // Check all known panels from all sets (original, clone, soysauce)
     let all_panels: Vec<panels::Panel> = panels::get_panels("original")
         .into_iter()
         .chain(panels::get_panels("clone"))
+        .chain(panels::get_panels("soysauce"))
         .collect();
 
     for panel in &all_panels {
-        let dtbo_path = overlays_dir.join(&panel.dtbo);
-        if let Ok(panel_data) = fs::read(&dtbo_path) {
-            if let Ok(panel_desc) = panel_config::extract_panel_description(&panel_data) {
-                let panel_hash = format!("{:x}", Md5::digest(&panel_desc));
-                if panel_hash == mipi_desc_hash {
-                    return (Some(panel.dtbo.clone()), Some(panel.name.clone()));
+        // Check in overlays/ root and overlays/soysauce/ subdirectory
+        let paths = [
+            overlays_dir.join(&panel.dtbo),
+            overlays_dir.join("soysauce").join(&panel.dtbo),
+        ];
+        for dtbo_path in &paths {
+            if let Ok(panel_data) = fs::read(dtbo_path) {
+                if let Ok(panel_desc) = panel_config::extract_panel_description(&panel_data) {
+                    let panel_hash = format!("{:x}", Md5::digest(&panel_desc));
+                    if panel_hash == mipi_desc_hash {
+                        return (Some(panel.dtbo.clone()), Some(panel.name.clone()));
+                    }
                 }
             }
         }
@@ -222,12 +229,19 @@ pub fn apply_overlay_with_config(
         return Err("Not an Arch R BOOT partition".to_string());
     }
 
-    let source = boot.join("overlays").join(panel_dtbo);
+    // Search in overlays/ root and overlays/soysauce/ subdirectory
+    let source = {
+        let primary = boot.join("overlays").join(panel_dtbo);
+        let soysauce = boot.join("overlays/soysauce").join(panel_dtbo);
+        if primary.exists() {
+            primary
+        } else if soysauce.exists() {
+            soysauce
+        } else {
+            return Err(format!("Panel overlay not found: {}", panel_dtbo));
+        }
+    };
     let target = boot.join("overlays/mipi-panel.dtbo");
-
-    if !source.exists() {
-        return Err(format!("Panel overlay not found: {}", panel_dtbo));
-    }
 
     let source_data = fs::read(&source)
         .map_err(|e| format!("Failed to read {}: {}", panel_dtbo, e))?;

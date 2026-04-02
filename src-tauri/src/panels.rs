@@ -41,10 +41,23 @@ const PANELS_CLONE: &[(&str, &str, &str)] = &[
     ("RX6S",   "RX6S (NV3051D)",           "rx6s.dtbo"),
 ];
 
+/// Soysauce R36S panels (Y3506 board variant, 7 panels).
+/// DTBO names from MIPI generator with ss_vXX_XXXXXXXX naming.
+const PANELS_SOYSAUCE: &[(&str, &str, &str)] = &[
+    ("SS_V03_1104", "Soysauce V03 (2024-11-04)", "ss_v03_20241104.dtbo"),
+    ("SS_V03_1210", "Soysauce V03 (2024-12-10)", "ss_v03_20241210.dtbo"),
+    ("SS_V03_0317", "Soysauce V03 (2025-03-17)", "ss_v03_20250317.dtbo"),
+    ("SS_V04_253x", "Soysauce V04 253x",         "ss_v04_20250529_253x.dtbo"),
+    ("SS_V04_2548", "Soysauce V04 2548",          "ss_v04_20250529_2548.dtbo"),
+    ("SS_V05_2551", "Soysauce V05 2551",          "ss_v05_20251215_2551.dtbo"),
+    ("SS_V05_2601", "Soysauce V05 2601",          "ss_v05_20251215_2601.dtbo"),
+];
+
 pub fn get_panels(console: &str) -> Vec<Panel> {
     let source = match console {
         "original" => PANELS_ORIGINAL,
         "clone" => PANELS_CLONE,
+        "soysauce" => PANELS_SOYSAUCE,
         _ => return vec![],
     };
     source.iter().map(|(id, name, dtbo)| Panel {
