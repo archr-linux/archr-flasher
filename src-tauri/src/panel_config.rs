@@ -370,11 +370,24 @@ pub fn read_dtbo_from_image(image_path: &Path, panel_dtbo: &str) -> Result<Vec<u
         return Err("overlays is not a directory".into());
     }
 
-    // 3. Read overlays directory
-    let overlays_data = read_chain(&mut file, overlays_cluster)?;
+    // 3. Read overlays directory and traverse path components
+    //    panel_dtbo can be "panel0.dtbo" or "soysauce/ss_v04.dtbo"
+    let parts: Vec<&str> = panel_dtbo.split('/').collect();
+    let mut current_data = read_chain(&mut file, overlays_cluster)?;
 
-    // 4. Find the DTBO file
-    let (dtbo_cluster, dtbo_size, _) = find_entry(&overlays_data, panel_dtbo)
+    // Traverse subdirectories if any (all parts except the last)
+    for &subdir in &parts[..parts.len() - 1] {
+        let (sub_cluster, _, is_sub_dir) = find_entry(&current_data, subdir)
+            .ok_or_else(|| format!("overlays/{} not found", subdir))?;
+        if !is_sub_dir {
+            return Err(format!("{} is not a directory", subdir));
+        }
+        current_data = read_chain(&mut file, sub_cluster)?;
+    }
+
+    // 4. Find the DTBO file in the final directory
+    let dtbo_name = parts.last().unwrap();
+    let (dtbo_cluster, dtbo_size, _) = find_entry(&current_data, dtbo_name)
         .ok_or_else(|| format!("overlays/{} not found", panel_dtbo))?;
 
     // 5. Read DTBO data
