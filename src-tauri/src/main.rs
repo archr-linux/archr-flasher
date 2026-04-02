@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod disk;
+mod dtb_to_overlay;
 mod dtbo_builder;
 mod flash;
 mod github;
@@ -218,47 +219,26 @@ fn apply_panel_with_config(
 
 /// Generate a panel overlay (DTBO) from a user-provided stock DTB file.
 /// Uses the bundled archr-dtbo.py script (requires Python 3 + fdt package).
+/// Generate a panel overlay (DTBO) from a user-provided stock DTB file.
+/// Pure Rust implementation — no Python, no external dependencies.
 #[tauri::command]
 async fn generate_overlay_from_dtb(
     app: tauri::AppHandle,
     dtb_path: String,
-    flags: Option<String>,
+    _flags: Option<String>,
 ) -> Result<String, String> {
-    use std::process::Command;
+    let dtb_data = std::fs::read(&dtb_path)
+        .map_err(|e| format!("Cannot read DTB file: {}", e))?;
 
-    // Find the bundled archr-dtbo.py script
-    let resource_dir = app.path().resource_dir()
-        .map_err(|e| format!("Resource dir error: {}", e))?;
-    let script = resource_dir.join("scripts").join("archr-dtbo.py");
-
-    if !script.exists() {
-        return Err("archr-dtbo.py not found. Ensure Python 3 and 'fdt' package are installed.".into());
-    }
+    let dtbo_data = dtb_to_overlay::generate_overlay(&dtb_data)?;
 
     let cache_dir = app.path().app_cache_dir()
         .map_err(|e| format!("Cache dir error: {}", e))?;
     let _ = std::fs::create_dir_all(&cache_dir);
     let output_path = cache_dir.join("custom-overlay.dtbo");
 
-    let flag_str = flags.unwrap_or_default();
-
-    let result = Command::new("python3")
-        .arg(&script)
-        .arg(&dtb_path)
-        .arg(&flag_str)
-        .arg("-o")
-        .arg(&output_path)
-        .output()
-        .map_err(|e| format!("Failed to run Python: {}. Is Python 3 installed?", e))?;
-
-    if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(format!("Overlay generation failed: {}", stderr.trim()));
-    }
-
-    if !output_path.exists() {
-        return Err("Overlay file was not created.".into());
-    }
+    std::fs::write(&output_path, &dtbo_data)
+        .map_err(|e| format!("Failed to write overlay: {}", e))?;
 
     Ok(output_path.to_string_lossy().to_string())
 }

@@ -568,15 +568,18 @@ function buildOverlaySummary() {
 async function handleCustomDTB(statusFn) {
   try {
     const selected = await window.__TAURI__.dialog.open({
-      filters: [{ name: 'Device Tree Binary', extensions: ['dtb'] }]
+      filters: [{ name: 'Device Tree Binary', extensions: ['dtb'] }],
+      multiple: false,
     });
     if (!selected) return null;
 
-    const fileName = selected.split(/[/\\]/).pop();
+    // dialog.open may return an object with path property in Tauri 2
+    const filePath = typeof selected === 'string' ? selected : selected.path || selected;
+    const fileName = String(filePath).split(/[/\\]/).pop();
     statusFn(t('custom_dtb_generating', { file: fileName }), '');
 
     const dtboPath = await invoke('generate_overlay_from_dtb', {
-      dtbPath: selected,
+      dtbPath: String(filePath),
       flags: null,
     });
 
@@ -589,7 +592,7 @@ async function handleCustomDTB(statusFn) {
 }
 
 $('btn-custom-dtb')?.addEventListener('click', async () => {
-  const dtboPath = await handleCustomDTB(setFlashStatus);
+  const dtboPath = await handleCustomDTB(setPanelStatus);
   if (dtboPath) {
     // Set as selected panel with the custom DTBO path
     selectedPanel = { id: 'custom', dtbo: '__custom__' };
@@ -616,6 +619,11 @@ function setBusy(b) {
   busy = b;
   updateNextButton();
   document.querySelectorAll('.mode-tab').forEach(t => t.disabled = b);
+}
+
+function setPanelStatus(text, type) {
+  $('panel-status').textContent = text;
+  $('panel-status').className = 'status' + (type ? ' ' + type : '');
 }
 
 function setFlashStatus(text, type) {

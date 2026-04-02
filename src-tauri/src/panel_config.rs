@@ -3,7 +3,6 @@
 
 use crate::dtbo_builder::FdtBuilder;
 use serde::{Deserialize, Serialize};
-use std::io::Read;
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -312,7 +311,7 @@ pub fn read_dtbo_from_image(image_path: &Path, panel_dtbo: &str) -> Result<Vec<u
                         }
                     }
                 }
-                let seq = entry[0] & 0x1F;
+                let _seq = entry[0] & 0x1F;
                 if entry[0] & 0x40 != 0 {
                     lfn_buf.clear();
                 }
