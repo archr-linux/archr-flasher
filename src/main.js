@@ -400,12 +400,11 @@ async function startFlash() {
   setFlashStatus(t('writing'), '');
 
   try {
-    const variant = selectedConsole === 'soysauce' ? 'original' : selectedConsole;
     const panelDtbo = selectedPanel.dtbo === '__custom__' ? selectedPanel._customDtboPath : selectedPanel.dtbo;
 
     await invoke('flash_image', {
       imagePath, device: selectedDisk,
-      panelDtbo, variant,
+      panelDtbo, variant: selectedConsole,
       rotation: parseInt($('rotation-select').value) || 0,
       invertLeftStick: $('invert-lstick').checked,
       invertRightStick: $('invert-rstick').checked,
