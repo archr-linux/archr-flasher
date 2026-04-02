@@ -95,7 +95,7 @@ function nextStep() {
       if (stepId === 'disk') onDiskReady();
     }
     if (mode === 'overlay') {
-      if (stepId === 'ovl-customize') applyOverlay();
+      if (stepId === 'ovl-customize') buildOverlaySummary();
     }
     goToStep(currentStep + 1);
   }
@@ -230,6 +230,7 @@ document.querySelectorAll('#page-console .card').forEach(card => {
       $('image-name').textContent = t('no_image');
       $('image-version').textContent = '';
       selectedPanel = null;
+      checkLatestVersion(console);
     }
 
     loadPanels(console, $('panel-select'));
@@ -259,6 +260,22 @@ $('panel-select').addEventListener('change', () => {
   selectedPanel = val ? JSON.parse(val) : null;
   updateNextButton();
 });
+
+// ---------------------------------------------------------------------------
+// Latest version check
+// ---------------------------------------------------------------------------
+async function checkLatestVersion(console) {
+  $('image-version').textContent = t('checking_version');
+  try {
+    const variant = console === 'soysauce' ? 'original' : console;
+    const release = await invoke('check_latest_release', { variant });
+    if (selectedConsole === console) {
+      $('image-version').textContent = t('latest_version', { version: release.version });
+    }
+  } catch (_) {
+    if (selectedConsole === console) $('image-version').textContent = t('offline');
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Image selection
@@ -344,12 +361,15 @@ function onDiskReady() { buildFlashSummary(); }
 // ---------------------------------------------------------------------------
 // Flash summary & execution
 // ---------------------------------------------------------------------------
+const CONSOLE_I18N = { original: 'original_name', clone: 'clone_name', soysauce: 'soysauce_name' };
+
 function buildFlashSummary() {
+  const consoleName = t(CONSOLE_I18N[selectedConsole] || selectedConsole);
   const panelName = selectedPanel ? $('panel-select').options[$('panel-select').selectedIndex].textContent : t('overlay_none');
   const diskName = selectedDisk ? $('disk-select').options[$('disk-select').selectedIndex].textContent : t('overlay_none');
   const imgName = $('image-name').textContent;
   $('flash-summary').innerHTML = `
-    <strong>${t('console')}:</strong> ${selectedConsole}<br>
+    <strong>${t('step_console')}:</strong> ${consoleName}<br>
     <strong>${t('step_image')}:</strong> ${imgName}<br>
     <strong>${t('step_panel')}:</strong> ${panelName}<br>
     <strong>${t('rotation')}:</strong> ${$('rotation-select').value}°<br>
@@ -381,9 +401,11 @@ async function startFlash() {
 
   try {
     const variant = selectedConsole === 'soysauce' ? 'original' : selectedConsole;
+    const panelDtbo = selectedPanel.dtbo === '__custom__' ? selectedPanel._customDtboPath : selectedPanel.dtbo;
+
     await invoke('flash_image', {
       imagePath, device: selectedDisk,
-      panelDtbo: selectedPanel.dtbo, variant,
+      panelDtbo, variant,
       rotation: parseInt($('rotation-select').value) || 0,
       invertLeftStick: $('invert-lstick').checked,
       invertRightStick: $('invert-rstick').checked,
@@ -509,15 +531,22 @@ async function applyOverlay() {
   setOverlayStatus(t('overlay_applying'), '');
 
   try {
-    await invoke('apply_panel_with_config', {
-      bootPath: overlayBootPath,
-      panelDtbo: overlaySelectedPanel.dtbo,
-      variant: overlayConsole || 'original',
-      rotation: parseInt($('overlay-rotation-select').value) || 0,
-      invertLeftStick: $('overlay-invert-lstick').checked,
-      invertRightStick: $('overlay-invert-rstick').checked,
-      hpInvert: $('overlay-hp-invert').checked,
-    });
+    if (overlaySelectedPanel.dtbo === '__custom__' && overlaySelectedPanel._customDtboPath) {
+      await invoke('apply_custom_overlay', {
+        bootPath: overlayBootPath,
+        dtboPath: overlaySelectedPanel._customDtboPath,
+      });
+    } else {
+      await invoke('apply_panel_with_config', {
+        bootPath: overlayBootPath,
+        panelDtbo: overlaySelectedPanel.dtbo,
+        variant: overlayConsole || 'original',
+        rotation: parseInt($('overlay-rotation-select').value) || 0,
+        invertLeftStick: $('overlay-invert-lstick').checked,
+        invertRightStick: $('overlay-invert-rstick').checked,
+        hpInvert: $('overlay-hp-invert').checked,
+      });
+    }
 
     buildOverlaySummary();
     setOverlayStatus(t('overlay_applied'), 'success');
@@ -535,28 +564,50 @@ function buildOverlaySummary() {
 }
 
 // ---------------------------------------------------------------------------
-// Custom DTB (placeholder)
+// Custom DTB → Generate Overlay
 // ---------------------------------------------------------------------------
-$('btn-custom-dtb')?.addEventListener('click', async () => {
+async function handleCustomDTB(statusFn) {
   try {
     const selected = await window.__TAURI__.dialog.open({
-      filters: [{ name: 'Device Tree', extensions: ['dtb'] }]
+      filters: [{ name: 'Device Tree Binary', extensions: ['dtb'] }]
     });
-    if (selected) {
-      setFlashStatus(t('custom_dtb_selected', { file: selected.split(/[/\\]/).pop() }), '');
-    }
-  } catch (_) {}
+    if (!selected) return null;
+
+    const fileName = selected.split(/[/\\]/).pop();
+    statusFn(t('custom_dtb_generating', { file: fileName }), '');
+
+    const dtboPath = await invoke('generate_overlay_from_dtb', {
+      dtbPath: selected,
+      flags: null,
+    });
+
+    statusFn(t('custom_dtb_ready', { file: fileName }), 'success');
+    return dtboPath;
+  } catch (e) {
+    statusFn(t('error') + ': ' + e, 'error');
+    return null;
+  }
+}
+
+$('btn-custom-dtb')?.addEventListener('click', async () => {
+  const dtboPath = await handleCustomDTB(setFlashStatus);
+  if (dtboPath) {
+    // Set as selected panel with the custom DTBO path
+    selectedPanel = { id: 'custom', dtbo: '__custom__' };
+    selectedPanel._customDtboPath = dtboPath;
+    $('panel-select').innerHTML = `<option value="" selected>${t('custom_dtb_overlay')}</option>`;
+    updateNextButton();
+  }
 });
 
 $('btn-ovl-custom-dtb')?.addEventListener('click', async () => {
-  try {
-    const selected = await window.__TAURI__.dialog.open({
-      filters: [{ name: 'Device Tree', extensions: ['dtb'] }]
-    });
-    if (selected) {
-      setOverlayStatus(t('custom_dtb_selected', { file: selected.split(/[/\\]/).pop() }), '');
-    }
-  } catch (_) {}
+  const dtboPath = await handleCustomDTB(setOverlayStatus);
+  if (dtboPath) {
+    overlaySelectedPanel = { id: 'custom', dtbo: '__custom__' };
+    overlaySelectedPanel._customDtboPath = dtboPath;
+    $('overlay-panel-select').innerHTML = `<option value="" selected>${t('custom_dtb_overlay')}</option>`;
+    updateNextButton();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -616,6 +667,12 @@ function translateError(msg) {
 async function init() {
   await initI18n();
   updateUI();
+
+  // Show app version
+  try {
+    const version = await invoke('get_version');
+    if (version) $('app-version').textContent = 'v' + version;
+  } catch (_) {}
 
   try {
     const result = await invoke('check_app_update');

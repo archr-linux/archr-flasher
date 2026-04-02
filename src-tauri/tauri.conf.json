@@ -13,8 +13,10 @@
     "windows": [
       {
         "title": "Arch R Flasher",
-        "width": 520,
-        "height": 980,
+        "width": 680,
+        "height": 480,
+        "minWidth": 600,
+        "minHeight": 400,
         "resizable": true,
         "center": true
       }
@@ -34,6 +36,9 @@
       "icons/icon.icns",
       "icons/icon.ico",
       "icons/icon.png"
+    ],
+    "resources": [
+      "scripts/archr-dtbo.py"
     ],
     "macOS": {
       "signingIdentity": null,

@@ -23,6 +23,11 @@ fn get_locale() -> String {
 }
 
 #[tauri::command]
+fn get_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
 fn get_panels(console: &str) -> Vec<Panel> {
     panels::get_panels(console)
 }
@@ -207,6 +212,81 @@ fn apply_panel_with_config(
     Ok(result)
 }
 
+/// Generate a panel overlay (DTBO) from a user-provided stock DTB file.
+/// Uses the bundled archr-dtbo.py script (requires Python 3 + fdt package).
+#[tauri::command]
+async fn generate_overlay_from_dtb(
+    app: tauri::AppHandle,
+    dtb_path: String,
+    flags: Option<String>,
+) -> Result<String, String> {
+    use std::process::Command;
+
+    // Find the bundled archr-dtbo.py script
+    let resource_dir = app.path().resource_dir()
+        .map_err(|e| format!("Resource dir error: {}", e))?;
+    let script = resource_dir.join("scripts").join("archr-dtbo.py");
+
+    if !script.exists() {
+        return Err("archr-dtbo.py not found. Ensure Python 3 and 'fdt' package are installed.".into());
+    }
+
+    let cache_dir = app.path().app_cache_dir()
+        .map_err(|e| format!("Cache dir error: {}", e))?;
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let output_path = cache_dir.join("custom-overlay.dtbo");
+
+    let flag_str = flags.unwrap_or_default();
+
+    let result = Command::new("python3")
+        .arg(&script)
+        .arg(&dtb_path)
+        .arg(&flag_str)
+        .arg("-o")
+        .arg(&output_path)
+        .output()
+        .map_err(|e| format!("Failed to run Python: {}. Is Python 3 installed?", e))?;
+
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(format!("Overlay generation failed: {}", stderr.trim()));
+    }
+
+    if !output_path.exists() {
+        return Err("Overlay file was not created.".into());
+    }
+
+    Ok(output_path.to_string_lossy().to_string())
+}
+
+/// Apply a custom-generated overlay (from DTB) to an existing SD card.
+#[tauri::command]
+fn apply_custom_overlay(
+    boot_path: &str,
+    dtbo_path: &str,
+) -> Result<String, String> {
+    let boot = std::path::Path::new(boot_path);
+    let source = std::path::Path::new(dtbo_path);
+    let target = boot.join("overlays/mipi-panel.dtbo");
+
+    if !source.exists() {
+        return Err("Custom overlay file not found.".into());
+    }
+
+    std::fs::copy(source, &target)
+        .map_err(|e| format!("Failed to copy overlay: {}", e))?;
+
+    // fsync the file and parent directory
+    if let Ok(f) = std::fs::File::open(&target) {
+        let _ = f.sync_all();
+    }
+    if let Ok(d) = std::fs::File::open(target.parent().unwrap()) {
+        let _ = d.sync_all();
+    }
+
+    Ok("Custom overlay applied.".into())
+}
+
 /// Check if a new version of the Flasher app is available.
 #[tauri::command]
 async fn check_app_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
@@ -257,6 +337,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_locale,
+            get_version,
             get_panels,
             list_disks,
             check_latest_release,
@@ -265,6 +346,8 @@ fn main() {
             find_archr_sd,
             read_overlay,
             apply_panel_with_config,
+            generate_overlay_from_dtb,
+            apply_custom_overlay,
             check_app_update,
             install_app_update,
         ])

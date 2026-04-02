@@ -90,7 +90,10 @@
   "panel_hint": "Elija el panel que coincida con la pantalla de su dispositivo.",
   "custom_dtb": "Generar desde DTB personalizado...",
   "custom_dtb_hint": "Proporcione su propio DTB del firmware original para generar un overlay.",
-  "custom_dtb_selected": "DTB personalizado: {file} (próximamente)",
+  "custom_dtb_selected": "DTB personalizado: {file}",
+  "custom_dtb_generating": "Generando overlay a partir de {file}...",
+  "custom_dtb_ready": "Overlay generado a partir de {file}",
+  "custom_dtb_overlay": "Overlay personalizado (de DTB)",
   "yes": "Sí",
   "no": "No"
 }
