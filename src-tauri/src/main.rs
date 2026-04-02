@@ -196,7 +196,7 @@ fn read_overlay(boot_path: &str) -> overlay::OverlayStatus {
 fn apply_panel_with_config(
     boot_path: &str,
     panel_dtbo: &str,
-    _variant: &str,
+    variant: &str,
     rotation: u32,
     invert_left_stick: bool,
     invert_right_stick: bool,
@@ -209,6 +209,10 @@ fn apply_panel_with_config(
         hp_invert,
     };
     let result = overlay::apply_overlay_with_config(boot_path, panel_dtbo, &config)?;
+
+    // Switch extlinux config for soysauce variant
+    overlay::switch_extlinux_for_variant(boot_path, variant);
+
     Ok(result)
 }
 

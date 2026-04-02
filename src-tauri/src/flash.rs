@@ -404,8 +404,14 @@ fi
 mkdir -p "$MOUNT_DIR/overlays"
 cp "$CUSTOM_DTBO" "$MOUNT_DIR/overlays/mipi-panel.dtbo"
 
-# Write variant file (original or clone)
+# Write variant file
 echo -n "$VARIANT" > "$MOUNT_DIR/variant"
+
+# Switch extlinux config for soysauce variant (uses explicit FDT)
+if [ "$VARIANT" = "soysauce" ] && [ -f "$MOUNT_DIR/extlinux/extlinux.conf.soysauce" ]; then
+    cp "$MOUNT_DIR/extlinux/extlinux.conf" "$MOUNT_DIR/extlinux/extlinux.conf.bak"
+    cp "$MOUNT_DIR/extlinux/extlinux.conf.soysauce" "$MOUNT_DIR/extlinux/extlinux.conf"
+fi
 
 sync
 umount "$MOUNT_DIR"

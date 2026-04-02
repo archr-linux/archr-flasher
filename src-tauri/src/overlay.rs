@@ -264,3 +264,37 @@ pub fn apply_overlay_with_config(
     Ok(format!("Applied {} as mipi-panel.dtbo", panel_dtbo))
 }
 
+/// Switch extlinux.conf for a specific variant.
+/// Soysauce needs an explicit FDT line pointing to its device tree.
+/// For other variants, restore the default extlinux.conf from backup if available.
+pub fn switch_extlinux_for_variant(boot_path: &str, variant: &str) {
+    let boot = Path::new(boot_path);
+    let extlinux_dir = boot.join("extlinux");
+    let conf = extlinux_dir.join("extlinux.conf");
+    let conf_variant = extlinux_dir.join(format!("extlinux.conf.{}", variant));
+    let conf_bak = extlinux_dir.join("extlinux.conf.bak");
+
+    if !extlinux_dir.exists() {
+        return;
+    }
+
+    if variant == "soysauce" && conf_variant.exists() {
+        // Backup current conf and activate soysauce
+        if conf.exists() && !conf_bak.exists() {
+            let _ = fs::copy(&conf, &conf_bak);
+        }
+        let _ = fs::copy(&conf_variant, &conf);
+    } else if conf_bak.exists() {
+        // Restore default conf from backup (switching away from soysauce)
+        let _ = fs::copy(&conf_bak, &conf);
+    }
+
+    // Write variant file
+    let _ = fs::write(boot.join("variant"), variant);
+
+    // Fsync
+    if let Ok(d) = fs::File::open(&extlinux_dir) {
+        let _ = d.sync_all();
+    }
+}
+
