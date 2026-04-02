@@ -324,6 +324,46 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn main() {
+    // WebKitGTK EGL workaround for AppImage on Wayland.
+    // The AppImage bundles an older libwayland-client.so that conflicts with
+    // the system Mesa driver, causing "Could not create default EGL display:
+    // EGL_BAD_PARAMETER". Fix: preload the system's libwayland-client.so.
+    // LD_PRELOAD must be set before process start, so we re-exec ourselves.
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var("ARCHR_FLASHER_REEXEC").is_err()
+            && std::env::var("APPIMAGE").is_ok()
+        {
+            let wayland_libs = [
+                "/usr/lib/libwayland-client.so",
+                "/usr/lib64/libwayland-client.so",
+                "/usr/lib/x86_64-linux-gnu/libwayland-client.so",
+            ];
+            for lib in &wayland_libs {
+                if std::path::Path::new(lib).exists() {
+                    let current_preload = std::env::var("LD_PRELOAD").unwrap_or_default();
+                    if !current_preload.contains("libwayland-client") {
+                        let new_preload = if current_preload.is_empty() {
+                            lib.to_string()
+                        } else {
+                            format!("{}:{}", lib, current_preload)
+                        };
+                        std::env::set_var("LD_PRELOAD", &new_preload);
+                        std::env::set_var("ARCHR_FLASHER_REEXEC", "1");
+                        use std::os::unix::process::CommandExt;
+                        let exe = std::env::current_exe().expect("Cannot get exe path");
+                        let args: Vec<String> = std::env::args().skip(1).collect();
+                        let err = std::process::Command::new(&exe)
+                            .args(&args)
+                            .exec();
+                        eprintln!("Re-exec failed: {}", err);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
