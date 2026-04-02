@@ -348,8 +348,12 @@ fn main() {
                         } else {
                             format!("{}:{}", lib, current_preload)
                         };
-                        std::env::set_var("LD_PRELOAD", &new_preload);
-                        std::env::set_var("ARCHR_FLASHER_REEXEC", "1");
+                        // SAFETY: this runs before any threads are spawned,
+                        // and we immediately re-exec the process.
+                        unsafe {
+                            std::env::set_var("LD_PRELOAD", &new_preload);
+                            std::env::set_var("ARCHR_FLASHER_REEXEC", "1");
+                        }
                         use std::os::unix::process::CommandExt;
                         let exe = std::env::current_exe().expect("Cannot get exe path");
                         let args: Vec<String> = std::env::args().skip(1).collect();
