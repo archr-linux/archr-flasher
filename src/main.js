@@ -397,6 +397,8 @@ async function startFlash() {
   $('progress-fill').style.width = '0%';
   $('progress-percent').textContent = '0%';
   $('progress-stage').textContent = t('writing');
+  const sdWarn = $('sd-speed-warning');
+  if (sdWarn) { sdWarn.classList.add('hidden'); sdWarn.textContent = ''; }
   setFlashStatus(t('writing'), '');
 
   try {
@@ -427,6 +429,25 @@ window.__TAURI__?.event?.listen('flash-progress', (event) => {
   $('progress-fill').style.width = percent.toFixed(1) + '%';
   $('progress-percent').textContent = percent.toFixed(0) + '%';
   $('progress-stage').textContent = t(stage) || stage;
+});
+
+window.__TAURI__?.event?.listen('sd-speed-result', (event) => {
+  const { quality, speed_mbs } = event.payload;
+  const el = $('sd-speed-warning');
+  if (!el) return;
+  if (quality === 'slow') {
+    el.textContent = t('sd_slow_warning').replace('{speed}', speed_mbs);
+    el.className = 'sd-speed-warning sd-slow';
+    el.classList.remove('hidden');
+  } else if (quality === 'medium') {
+    el.textContent = t('sd_medium_info').replace('{speed}', speed_mbs);
+    el.className = 'sd-speed-warning sd-medium';
+    el.classList.remove('hidden');
+  } else {
+    el.textContent = t('sd_fast_info').replace('{speed}', speed_mbs);
+    el.className = 'sd-speed-warning sd-fast';
+    el.classList.remove('hidden');
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -651,7 +672,8 @@ function translateError(msg) {
     [/not a removable/i, 'error_not_removable'],
     [/no.*image.*found/i, 'error_no_image'],
     [/network|dns|connect|timeout/i, 'error_network'],
-    [/checksum.*fail/i, 'error_checksum_failed'],
+    [/checksum.*fail|sha256 mismatch/i, 'error_checksum_failed'],
+    [/verify_failed/i, 'error_verify_failed'],
     [/failed to run pkexec|osascript error|failed to run powershell/i, 'error_privilege'],
     [/not authorized|dismissed/i, 'error_privilege'],
     [/decompress error|xzdecoder/i, 'error_decompress'],
@@ -674,6 +696,16 @@ function translateError(msg) {
 async function init() {
   await initI18n();
   updateUI();
+
+  // Update console card descriptions with dynamic panel counts
+  for (const console of ['original', 'clone', 'soysauce']) {
+    try {
+      const panels = await invoke('get_panels', { console });
+      const descKey = console + '_desc';
+      const el = document.querySelector(`[data-i18n="${descKey}"]`);
+      if (el) el.textContent = t(descKey, { count: panels.length });
+    } catch (_) {}
+  }
 
   // Show app version
   try {

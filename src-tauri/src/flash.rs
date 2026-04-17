@@ -89,7 +89,10 @@ fn check_temp_space(image_path: &str) -> Result<(), String> {
 }
 
 /// Poll a progress file written by the flash script.
-/// Maps bytes written (0..image_size) to progress (60%..95%).
+/// Supports two formats:
+///   - Raw number: bytes written → maps to writing progress (55%..90%)
+///   - "STAGE:verifying": switches to verification stage (90%..98%)
+///   - "STAGE:done": emits 100%
 fn poll_flash_progress(
     app: AppHandle,
     progress_file: PathBuf,
@@ -100,9 +103,39 @@ fn poll_flash_progress(
         while !stop.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(500));
             if let Ok(content) = fs::read_to_string(&progress_file) {
-                if let Ok(bytes) = content.trim().parse::<u64>() {
+                let content = content.trim();
+                if content.starts_with("STAGE:testing") {
+                    emit_progress(&app, 55.0, "testing_sd");
+                } else if content.starts_with("STAGE:speed_slow:") {
+                    let speed = content.trim_start_matches("STAGE:speed_slow:");
+                    let _ = app.emit("sd-speed-result", serde_json::json!({
+                        "quality": "slow",
+                        "speed_mbs": speed.parse::<u32>().unwrap_or(0)
+                    }));
+                    emit_progress(&app, 56.0, "writing_safe");
+                } else if content.starts_with("STAGE:speed_medium:") {
+                    let speed = content.trim_start_matches("STAGE:speed_medium:");
+                    let _ = app.emit("sd-speed-result", serde_json::json!({
+                        "quality": "medium",
+                        "speed_mbs": speed.parse::<u32>().unwrap_or(0)
+                    }));
+                    emit_progress(&app, 56.0, "writing");
+                } else if content.starts_with("STAGE:speed_ok:") {
+                    let speed = content.trim_start_matches("STAGE:speed_ok:");
+                    let _ = app.emit("sd-speed-result", serde_json::json!({
+                        "quality": "fast",
+                        "speed_mbs": speed.parse::<u32>().unwrap_or(0)
+                    }));
+                    emit_progress(&app, 56.0, "writing");
+                } else if content.starts_with("STAGE:verifying") {
+                    emit_progress(&app, 90.0, "verifying");
+                } else if content.starts_with("STAGE:done") {
+                    emit_progress(&app, 98.0, "finalizing");
+                } else if content.starts_with("VERIFY_FAILED") {
+                    // Error will be handled by stderr parsing
+                } else if let Ok(bytes) = content.parse::<u64>() {
                     if image_size > 0 {
-                        let pct = 60.0 + (bytes as f64 / image_size as f64 * 35.0).min(35.0);
+                        let pct = 55.0 + (bytes as f64 / image_size as f64 * 35.0).min(35.0);
                         emit_progress(&app, pct, "writing");
                     }
                 }
@@ -205,10 +238,13 @@ pub fn flash_image_privileged(
         if stderr.contains("dismissed") || stderr.contains("Not authorized") {
             return Err("cancelled".into());
         }
-        // Pass dd error through directly so frontend shows the real cause
+        // Pass errors through so frontend shows the real cause
         let stderr = stderr.trim();
         if stderr.starts_with("dd failed:") {
             return Err(format!("dd error: {}", &stderr[10..].trim()));
+        }
+        if stderr.contains("Verification failed") {
+            return Err("verify_failed".into());
         }
         return Err(format!("Flash failed: {}", stderr));
     }
@@ -317,25 +353,88 @@ sleep 1
 blockdev --flushbufs "$DEVICE" 2>/dev/null || true
 wipefs -a "$DEVICE" 2>/dev/null || true
 
-# Write raw image with retry (SD cards can have transient I/O errors)
+# === SD CARD SPEED TEST ===
+echo "STAGE:testing" > "$PROGRESS_FILE"
+TEST_SIZE=8388608  # 8MB test write
+TEST_FILE=$(mktemp)
+dd if=/dev/urandom of="$TEST_FILE" bs=1M count=8 status=none 2>/dev/null
+
+START_NS=$(date +%s%N)
+dd if="$TEST_FILE" of="$DEVICE" bs=1M conv=fsync status=none 2>/dev/null
+END_NS=$(date +%s%N)
+rm -f "$TEST_FILE"
+
+ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
+if [ "$ELAPSED_MS" -gt 0 ]; then
+    SPEED_KBS=$(( TEST_SIZE / ELAPSED_MS ))  # KB/s (approx MB/s * 1000)
+else
+    SPEED_KBS=99999
+fi
+
+# Determine write strategy based on SD speed
+# SPEED_KBS: ~15000+ = fast, 5000-15000 = medium, <5000 = slow
+SPEED_MBS=$(( SPEED_KBS / 1000 ))
+
+if [ "$SPEED_KBS" -ge 15000 ]; then
+    BS="4M"
+    DD_FLAGS="conv=fsync"
+    echo "STAGE:speed_ok:${SPEED_MBS}" > "$PROGRESS_FILE"
+elif [ "$SPEED_KBS" -ge 5000 ]; then
+    BS="1M"
+    DD_FLAGS="conv=fsync"
+    echo "STAGE:speed_medium:${SPEED_MBS}" > "$PROGRESS_FILE"
+else
+    BS="512K"
+    DD_FLAGS="oflag=dsync"
+    echo "STAGE:speed_slow:${SPEED_MBS}" > "$PROGRESS_FILE"
+fi
+
+# Re-flush after speed test write
+blockdev --flushbufs "$DEVICE" 2>/dev/null || true
+
+IMAGE_SIZE=$(stat -c%s "$IMAGE")
+
+# === WRITE WITH ADAPTIVE STRATEGY ===
 DD_OK=0
+STALL_TIMEOUT=30
+
 for attempt in 1 2 3; do
     DD_ERR=$(mktemp)
-    dd if="$IMAGE" of="$DEVICE" bs=4M conv=fsync status=none 2>"$DD_ERR" &
+    dd if="$IMAGE" of="$DEVICE" bs="$BS" $DD_FLAGS status=none 2>"$DD_ERR" &
     DD_PID=$!
 
-    # Monitor dd progress via /proc/fdinfo
+    # Monitor dd progress via /proc/fdinfo with stall detection
+    LAST_POS=0
+    STALL_COUNT=0
     while kill -0 $DD_PID 2>/dev/null; do
         sleep 1
         if [ -f "/proc/$DD_PID/fdinfo/1" ]; then
             POS=$(grep '^pos:' "/proc/$DD_PID/fdinfo/1" 2>/dev/null | awk '{print $2}')
             if [ -n "$POS" ]; then
                 echo "$POS" > "$PROGRESS_FILE"
+                if [ "$POS" = "$LAST_POS" ]; then
+                    STALL_COUNT=$((STALL_COUNT + 1))
+                    if [ "$STALL_COUNT" -ge "$STALL_TIMEOUT" ]; then
+                        kill -9 $DD_PID 2>/dev/null || true
+                        wait $DD_PID 2>/dev/null || true
+                        echo "dd stalled: no progress for ${STALL_TIMEOUT}s at byte $POS" >&2
+                        # Downgrade to safer mode on stall
+                        if [ "$BS" = "4M" ]; then
+                            BS="1M"; DD_FLAGS="conv=fsync"
+                        elif [ "$BS" = "1M" ]; then
+                            BS="512K"; DD_FLAGS="oflag=dsync"
+                        fi
+                        break
+                    fi
+                else
+                    STALL_COUNT=0
+                    LAST_POS="$POS"
+                fi
             fi
         fi
     done
 
-    if wait $DD_PID; then
+    if wait $DD_PID 2>/dev/null; then
         DD_OK=1
         rm -f "$DD_ERR"
         break
@@ -345,7 +444,6 @@ for attempt in 1 2 3; do
     rm -f "$DD_ERR"
     if [ "$attempt" -lt 3 ]; then
         sleep 2
-        # Re-unmount in case desktop auto-mounted during write
         unmount_all
         blockdev --flushbufs "$DEVICE" 2>/dev/null || true
         echo "0" > "$PROGRESS_FILE"
@@ -354,6 +452,11 @@ for attempt in 1 2 3; do
         exit 1
     fi
 done
+
+if [ "$DD_OK" -ne 1 ]; then
+    echo "dd failed: write did not complete after 3 attempts" >&2
+    exit 1
+fi
 
 sync
 
@@ -416,6 +519,29 @@ fi
 sync
 umount "$MOUNT_DIR"
 rmdir "$MOUNT_DIR"
+
+# === POST-WRITE VERIFICATION ===
+echo "STAGE:verifying" > "$PROGRESS_FILE"
+
+IMAGE_SIZE=$(stat -c%s "$IMAGE")
+
+# Flush kernel buffers before re-reading
+blockdev --flushbufs "$DEVICE" 2>/dev/null || true
+
+# Compute SHA256 of original image
+IMAGE_HASH=$(sha256sum "$IMAGE" | cut -d' ' -f1)
+
+# Read back from SD card and compute SHA256 (only image-sized bytes)
+BLOCK_COUNT=$(( (IMAGE_SIZE + 4194303) / 4194304 ))
+DEVICE_HASH=$(dd if="$DEVICE" bs=4M count="$BLOCK_COUNT" iflag=direct status=none 2>/dev/null | head -c "$IMAGE_SIZE" | sha256sum | cut -d' ' -f1)
+
+if [ "$IMAGE_HASH" != "$DEVICE_HASH" ]; then
+    echo "VERIFY_FAILED:$IMAGE_HASH:$DEVICE_HASH" > "$PROGRESS_FILE"
+    echo "Verification failed: SD card contents differ from written image (expected $IMAGE_HASH, got $DEVICE_HASH)" >&2
+    exit 1
+fi
+
+echo "STAGE:done" > "$PROGRESS_FILE"
 
 # Eject the device
 eject "$DEVICE" 2>/dev/null || true

@@ -13,6 +13,7 @@ pub struct ReleaseInfo {
     pub image_name: String,
     pub download_url: String,
     pub size_bytes: u64,
+    pub expected_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,11 +78,30 @@ pub async fn get_latest_release(variant: &str) -> Result<ReleaseInfo, String> {
         })
         .ok_or_else(|| format!("No image found for '{}' in latest release", variant))?;
 
+    // Look for a matching .sha256 asset (e.g. "image.img.xz.sha256")
+    let sha256_asset_name = format!("{}.sha256", asset.name);
+    let expected_sha256 = if let Some(hash_asset) = release.assets.iter()
+        .find(|a| a.name == sha256_asset_name)
+    {
+        // Download the small .sha256 file
+        match client.get(&hash_asset.browser_download_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                resp.text().await.ok()
+                    .map(|t| t.split_whitespace().next().unwrap_or("").trim().to_string())
+                    .filter(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     Ok(ReleaseInfo {
         version: release.tag_name,
         image_name: asset.name.clone(),
         download_url: asset.browser_download_url.clone(),
         size_bytes: asset.size,
+        expected_sha256,
     })
 }
 
@@ -105,6 +125,39 @@ fn verify_sha256(path: &Path, expected: &str) -> bool {
 
     let hash = format!("{:x}", hasher.finalize());
     hash == expected
+}
+
+/// Compute SHA256 of a file with progress reporting.
+/// Returns the hex-encoded hash string.
+pub fn verify_sha256_with_progress(app: &AppHandle, path: &Path) -> Result<String, String> {
+    let file = File::open(path)
+        .map_err(|e| format!("Cannot open file: {}", e))?;
+    let total = file.metadata()
+        .map_err(|e| format!("Metadata error: {}", e))?.len();
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    let mut read_bytes: u64 = 0;
+
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+                read_bytes += n as u64;
+                let percent = if total > 0 {
+                    (read_bytes as f64 / total as f64 * 100.0).min(100.0)
+                } else { 0.0 };
+                let _ = app.emit("verification-progress", serde_json::json!({
+                    "percent": percent,
+                    "stage": "verifying_download"
+                }));
+            }
+            Err(e) => return Err(format!("Read error: {}", e)),
+        }
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Download the image to cache_dir, emitting progress events.
@@ -208,6 +261,18 @@ pub async fn download_image(
     // Compute final hash and save
     let hash = format!("{:x}", hasher.finalize());
     let _ = fs::write(&hash_path, &hash);
+
+    // Verify against expected hash from release (if available)
+    if let Some(ref expected) = release.expected_sha256 {
+        if hash != *expected {
+            let _ = fs::remove_file(&temp);
+            let _ = fs::remove_file(&hash_path);
+            return Err(format!(
+                "Download corrupted: SHA256 mismatch\nExpected: {}\nGot: {}",
+                expected, hash
+            ));
+        }
+    }
 
     // Rename .part → final name
     fs::rename(&temp, &dest)

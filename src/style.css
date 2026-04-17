@@ -492,6 +492,29 @@ body {
   margin-top: 6px;
 }
 
+.sd-speed-warning {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  text-align: center;
+}
+.sd-speed-warning.sd-slow {
+  background: rgba(220, 50, 50, 0.15);
+  color: #ff6b6b;
+  border: 1px solid rgba(220, 50, 50, 0.3);
+}
+.sd-speed-warning.sd-medium {
+  background: rgba(220, 180, 50, 0.15);
+  color: #ffc107;
+  border: 1px solid rgba(220, 180, 50, 0.3);
+}
+.sd-speed-warning.sd-fast {
+  background: rgba(50, 180, 80, 0.15);
+  color: #4caf50;
+  border: 1px solid rgba(50, 180, 80, 0.3);
+}
+
 .progress-inline {
   margin-top: 10px;
   display: flex;

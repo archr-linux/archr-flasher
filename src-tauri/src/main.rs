@@ -61,6 +61,38 @@ async fn download_image(app: tauri::AppHandle, variant: String) -> Result<Downlo
     })
 }
 
+/// Verify integrity of a local image file by computing its SHA256.
+/// If expected_hash is provided, compares against it.
+#[tauri::command]
+async fn verify_image(
+    app: tauri::AppHandle,
+    image_path: String,
+    expected_hash: Option<String>,
+) -> Result<String, String> {
+    let path = std::path::Path::new(&image_path);
+    if !path.exists() {
+        return Err("Image file not found".into());
+    }
+
+    let app_clone = app.clone();
+    let path_clone = image_path.clone();
+    let hash = tokio::task::spawn_blocking(move || {
+        github::verify_sha256_with_progress(&app_clone, std::path::Path::new(&path_clone))
+    }).await
+        .map_err(|e| format!("Task error: {}", e))??;
+
+    if let Some(expected) = expected_hash {
+        if hash != expected {
+            return Err(format!(
+                "SHA256 mismatch\nExpected: {}\nGot: {}",
+                expected, hash
+            ));
+        }
+    }
+
+    Ok(hash)
+}
+
 /// Flash image to SD card with privilege escalation.
 /// Builds custom DTBO from panel + config before calling privileged script.
 #[tauri::command]
@@ -370,6 +402,7 @@ fn main() {
             list_disks,
             check_latest_release,
             download_image,
+            verify_image,
             flash_image,
             find_archr_sd,
             read_overlay,
