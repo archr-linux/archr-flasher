@@ -96,6 +96,8 @@
   "step_apply": "Apply",
   "next": "NEXT",
   "back": "BACK",
+  "panel_disclaimer": "If you don't know which panel you have, or the selected panel doesn't display correctly on your console (due to thousands of panel/board variations), use the option below to generate an overlay from YOUR DTB that already works on other OS.",
+  "panel_disclaimer_ok": "OK, got it",
   "panel_hint": "Choose the panel that matches your device screen.",
   "custom_dtb": "Generate from custom DTB...",
   "custom_dtb_hint": "Provide your own stock firmware DTB to generate an overlay.",

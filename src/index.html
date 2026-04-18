@@ -118,16 +118,23 @@
 
         <!-- Step: Panel -->
         <div class="step-content" id="page-panel">
-          <select id="panel-select" class="select">
-            <option value="" data-i18n="select_panel">Select panel</option>
-          </select>
-          <div class="hint" data-i18n="panel_hint">Choose the panel that matches your device screen.</div>
+          <div class="panel-disclaimer" id="panel-disclaimer">
+            <div class="disclaimer-icon">&#9888;</div>
+            <p data-i18n="panel_disclaimer"></p>
+            <button class="btn btn-sm" id="btn-dismiss-disclaimer" data-i18n="panel_disclaimer_ok">OK, got it</button>
+          </div>
+          <div id="panel-options" class="hidden">
+            <select id="panel-select" class="select">
+              <option value="" data-i18n="select_panel">Select panel</option>
+            </select>
+            <div class="hint" data-i18n="panel_hint">Choose the panel that matches your device screen.</div>
 
-          <div class="separator"></div>
-          <div class="custom-dtb-section">
-            <button class="btn btn-outline" id="btn-custom-dtb" data-i18n="custom_dtb">Generate from custom DTB...</button>
-            <small class="hint" data-i18n="custom_dtb_hint">Provide your own stock firmware DTB to generate an overlay.</small>
-            <div id="panel-status" class="status"></div>
+            <div class="separator"></div>
+            <div class="custom-dtb-section">
+              <button class="btn btn-outline" id="btn-custom-dtb" data-i18n="custom_dtb">Generate from custom DTB...</button>
+              <small class="hint" data-i18n="custom_dtb_hint">Provide your own stock firmware DTB to generate an overlay.</small>
+              <div id="panel-status" class="status"></div>
+            </div>
           </div>
         </div>
 

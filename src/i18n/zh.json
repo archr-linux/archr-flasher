@@ -96,6 +96,8 @@
   "step_apply": "应用",
   "next": "下一步",
   "back": "返回",
+  "panel_disclaimer": "如果您不确定您的面板型号，或所选面板在您的主机上显示不正确（由于面板/主板存在大量变体），请使用下方选项，通过您在其他系统中正常使用的 DTB 文件生成覆盖层。",
+  "panel_disclaimer_ok": "好的，我知道了",
   "panel_hint": "选择与您设备屏幕匹配的面板。",
   "custom_dtb": "从自定义 DTB 生成...",
   "custom_dtb_hint": "提供您自己的原始固件 DTB 来生成覆盖层。",

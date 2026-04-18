@@ -612,6 +612,11 @@ async function handleCustomDTB(statusFn) {
   }
 }
 
+$('btn-dismiss-disclaimer')?.addEventListener('click', () => {
+  $('panel-disclaimer').classList.add('hidden');
+  $('panel-options').classList.remove('hidden');
+});
+
 $('btn-custom-dtb')?.addEventListener('click', async () => {
   const dtboPath = await handleCustomDTB(setPanelStatus);
   if (dtboPath) {

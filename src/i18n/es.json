@@ -96,6 +96,8 @@
   "step_apply": "Aplicar",
   "next": "SIGUIENTE",
   "back": "ATRÁS",
+  "panel_disclaimer": "Si no sabe qué panel tiene, o el panel seleccionado no se muestra correctamente en su consola (debido a miles de variaciones de panel/placa), use la opción de abajo para generar un overlay desde SU DTB que ya funciona en otros sistemas.",
+  "panel_disclaimer_ok": "OK, entendido",
   "panel_hint": "Elija el panel que coincida con la pantalla de su dispositivo.",
   "custom_dtb": "Generar desde DTB personalizado...",
   "custom_dtb_hint": "Proporcione su propio DTB del firmware original para generar un overlay.",

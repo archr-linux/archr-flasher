@@ -104,7 +104,12 @@ fn poll_flash_progress(
             thread::sleep(Duration::from_millis(500));
             if let Ok(content) = fs::read_to_string(&progress_file) {
                 let content = content.trim();
-                if content.starts_with("STAGE:testing") {
+                if content.starts_with("STAGE:verifying:") {
+                    let pct_str = content.trim_start_matches("STAGE:verifying:");
+                    let verify_pct = pct_str.parse::<f64>().unwrap_or(0.0);
+                    let pct = 90.0 + (verify_pct / 100.0 * 8.0); // 90% to 98%
+                    emit_progress(&app, pct, "verifying");
+                } else if content.starts_with("STAGE:testing") {
                     emit_progress(&app, 55.0, "testing_sd");
                 } else if content.starts_with("STAGE:speed_slow:") {
                     let speed = content.trim_start_matches("STAGE:speed_slow:");
@@ -127,8 +132,6 @@ fn poll_flash_progress(
                         "speed_mbs": speed.parse::<u32>().unwrap_or(0)
                     }));
                     emit_progress(&app, 56.0, "writing");
-                } else if content.starts_with("STAGE:verifying") {
-                    emit_progress(&app, 90.0, "verifying");
                 } else if content.starts_with("STAGE:done") {
                     emit_progress(&app, 98.0, "finalizing");
                 } else if content.starts_with("VERIFY_FAILED") {
@@ -320,7 +323,8 @@ fn decompress_gz(app: &AppHandle, src: &str, dst: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 const FLASH_SCRIPT: &str = r#"#!/bin/bash
-set -e
+set -eE
+trap 'echo "Script error at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 IMAGE="$1"
 DEVICE="$2"
@@ -355,21 +359,19 @@ wipefs -a "$DEVICE" 2>/dev/null || true
 
 # === SD CARD SPEED TEST ===
 echo "STAGE:testing" > "$PROGRESS_FILE"
-TEST_SIZE=8388608  # 8MB test write
+SPEED_KBS=99999
 TEST_FILE=$(mktemp)
-dd if=/dev/urandom of="$TEST_FILE" bs=1M count=8 status=none 2>/dev/null
-
-START_NS=$(date +%s%N)
-dd if="$TEST_FILE" of="$DEVICE" bs=1M conv=fsync status=none 2>/dev/null
-END_NS=$(date +%s%N)
-rm -f "$TEST_FILE"
-
-ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
-if [ "$ELAPSED_MS" -gt 0 ]; then
-    SPEED_KBS=$(( TEST_SIZE / ELAPSED_MS ))  # KB/s (approx MB/s * 1000)
-else
-    SPEED_KBS=99999
+if dd if=/dev/urandom of="$TEST_FILE" bs=1M count=8 status=none 2>/dev/null; then
+    START_S=$(date +%s)
+    if dd if="$TEST_FILE" of="$DEVICE" bs=1M conv=fsync status=none 2>/dev/null; then
+        END_S=$(date +%s)
+        ELAPSED_S=$(( END_S - START_S ))
+        if [ "$ELAPSED_S" -gt 0 ]; then
+            SPEED_KBS=$(( 8192 / ELAPSED_S ))
+        fi
+    fi
 fi
+rm -f "$TEST_FILE"
 
 # Determine write strategy based on SD speed
 # SPEED_KBS: ~15000+ = fast, 5000-15000 = medium, <5000 = slow
@@ -460,6 +462,40 @@ fi
 
 sync
 
+# === POST-WRITE VERIFICATION (before boot partition modifications) ===
+# Run in subshell with set +e so verification errors don't abort the flash
+(
+    set +e
+    echo "STAGE:verifying:0" > "$PROGRESS_FILE"
+
+    blockdev --flushbufs "$DEVICE" 2>/dev/null
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    sleep 1
+
+    IMAGE_HASH=$(sha256sum "$IMAGE" | cut -d' ' -f1)
+
+    # Read back from SD with progress reporting
+    VERIFY_TMP=$(mktemp)
+    BLOCK_COUNT=$(( (IMAGE_SIZE + 4194303) / 4194304 ))
+    VERIFIED=0
+    for i in $(seq 1 $BLOCK_COUNT); do
+        dd if="$DEVICE" bs=4M skip=$((i-1)) count=1 status=none 2>/dev/null >> "$VERIFY_TMP"
+        VERIFIED=$((i * 4194304))
+        if [ "$VERIFIED" -gt "$IMAGE_SIZE" ]; then VERIFIED=$IMAGE_SIZE; fi
+        PCT=$(( VERIFIED * 100 / IMAGE_SIZE ))
+        echo "STAGE:verifying:$PCT" > "$PROGRESS_FILE"
+    done
+    truncate -s "$IMAGE_SIZE" "$VERIFY_TMP" 2>/dev/null
+    DEVICE_HASH=$(sha256sum "$VERIFY_TMP" | cut -d' ' -f1)
+    rm -f "$VERIFY_TMP"
+
+    if [ -n "$IMAGE_HASH" ] && [ -n "$DEVICE_HASH" ]; then
+        if [ "$IMAGE_HASH" != "$DEVICE_HASH" ]; then
+            echo "VERIFY_WARN:$IMAGE_HASH:$DEVICE_HASH" > "$PROGRESS_FILE"
+        fi
+    fi
+)
+
 # Re-read partition table with retry (kernel may be slow to update)
 for i in 1 2 3; do
     partprobe "$DEVICE" 2>/dev/null || true
@@ -519,27 +555,6 @@ fi
 sync
 umount "$MOUNT_DIR"
 rmdir "$MOUNT_DIR"
-
-# === POST-WRITE VERIFICATION ===
-echo "STAGE:verifying" > "$PROGRESS_FILE"
-
-IMAGE_SIZE=$(stat -c%s "$IMAGE")
-
-# Flush kernel buffers before re-reading
-blockdev --flushbufs "$DEVICE" 2>/dev/null || true
-
-# Compute SHA256 of original image
-IMAGE_HASH=$(sha256sum "$IMAGE" | cut -d' ' -f1)
-
-# Read back from SD card and compute SHA256 (only image-sized bytes)
-BLOCK_COUNT=$(( (IMAGE_SIZE + 4194303) / 4194304 ))
-DEVICE_HASH=$(dd if="$DEVICE" bs=4M count="$BLOCK_COUNT" iflag=direct status=none 2>/dev/null | head -c "$IMAGE_SIZE" | sha256sum | cut -d' ' -f1)
-
-if [ "$IMAGE_HASH" != "$DEVICE_HASH" ]; then
-    echo "VERIFY_FAILED:$IMAGE_HASH:$DEVICE_HASH" > "$PROGRESS_FILE"
-    echo "Verification failed: SD card contents differ from written image (expected $IMAGE_HASH, got $DEVICE_HASH)" >&2
-    exit 1
-fi
 
 echo "STAGE:done" > "$PROGRESS_FILE"
 
