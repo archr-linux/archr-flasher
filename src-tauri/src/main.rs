@@ -151,6 +151,26 @@ async fn flash_image(
         let dtbo_bytes = if is_compressed {
             let _ = std::fs::create_dir_all(&cache_dir);
             let temp_img = cache_dir.join("archr-flash-temp.img");
+
+            // Invalidate the cached decompression when the source archive is
+            // newer (rebuilt with new overlay names) or when the user picked
+            // a different image entirely. Without this guard the flasher
+            // happily reads stale FAT contents — e.g. asking for
+            // "R36S-V22_2024-12-18.dtbo" on a temp.img still holding
+            // "panel0.dtbo".
+            if temp_img.exists() {
+                let stale = match (std::fs::metadata(&image_path), std::fs::metadata(&temp_img)) {
+                    (Ok(src), Ok(cached)) => match (src.modified(), cached.modified()) {
+                        (Ok(s), Ok(c)) => s > c,
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if stale {
+                    let _ = std::fs::remove_file(&temp_img);
+                }
+            }
+
             if temp_img.exists() {
                 read_with_fallback(&temp_img)?
             } else {

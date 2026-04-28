@@ -391,7 +391,31 @@ else
     echo "STAGE:speed_slow:${SPEED_MBS}" > "$PROGRESS_FILE"
 fi
 
+# Hold the speed stage long enough for the Rust progress poller to catch
+# it. The poller runs at 500 ms; without this the next stage overwrites
+# the file before any poll iteration sees it, and the UI never gets the
+# sd-speed-result event.
+sleep 2
+
 # Re-flush after speed test write
+blockdev --flushbufs "$DEVICE" 2>/dev/null || true
+
+# === ZERO FIRST AND LAST MB BEFORE WRITING ===
+# rpi-imager pattern: destroy any existing filesystem signatures so the
+# kernel can't confuse leftover state with the freshly written image.
+# 1 MB at start kills MBR + FAT32 BPB + ext4 superblock #0 + bootloader.
+# 1 MB at end kills any GPT backup table. Without this, fs-resize on
+# first boot saw stale /storage/.config from the previous flash and
+# refused to expand the storage partition, leaving emulator settings
+# (and broken gpu.driver values) bleeding across flashes.
+echo "STAGE:wiping_signatures" > "$PROGRESS_FILE"
+DEVICE_BYTES=$(blockdev --getsize64 "$DEVICE" 2>/dev/null || echo 0)
+dd if=/dev/zero of="$DEVICE" bs=1M count=1 conv=fsync status=none 2>/dev/null || true
+if [ "$DEVICE_BYTES" -gt $((2 * 1024 * 1024)) ]; then
+    LAST_MB_OFFSET=$((DEVICE_BYTES / (1024 * 1024) - 1))
+    dd if=/dev/zero of="$DEVICE" bs=1M count=1 seek="$LAST_MB_OFFSET" conv=fsync status=none 2>/dev/null || true
+fi
+sync
 blockdev --flushbufs "$DEVICE" 2>/dev/null || true
 
 IMAGE_SIZE=$(stat -c%s "$IMAGE")
@@ -694,6 +718,21 @@ diskutil unmountDisk force "$DEVICE" 2>/dev/null || true
 
 # Write raw image to device (macOS uses rdisk for raw access = faster)
 RDISK=$(echo "$DEVICE" | sed 's|/dev/disk|/dev/rdisk|')
+
+# === ZERO FIRST AND LAST MB BEFORE WRITING ===
+# Mirror the rpi-imager approach: destroy any leftover MBR/GPT/FS
+# signatures so kernel/diskutil can't fall back to stale partition state
+# from a previous flash. Critical for ArchR specifically because
+# fs-resize bails on first boot if /storage still has .config from the
+# previous SD owner, which kept the same SD bricked across reflashes.
+echo "STAGE:wiping_signatures" > "$PROGRESS_FILE"
+DEVICE_BYTES=$(diskutil info "$DEVICE" | awk '/Disk Size/ {for(i=1;i<=NF;i++) if($i ~ /^\([0-9]+/) {gsub(/[(),]/, "", $i); print $i; exit}}')
+dd if=/dev/zero of="$RDISK" bs=1m count=1 conv=sync 2>/dev/null || true
+if [ -n "$DEVICE_BYTES" ] && [ "$DEVICE_BYTES" -gt $((2 * 1024 * 1024)) ] 2>/dev/null; then
+    LAST_MB_OFFSET=$((DEVICE_BYTES / (1024 * 1024) - 1))
+    dd if=/dev/zero of="$RDISK" bs=1m count=1 oseek="$LAST_MB_OFFSET" conv=sync 2>/dev/null || true
+fi
+sync
 
 # dd in background, monitor via SIGINFO
 DD_STDERR=$(mktemp)
