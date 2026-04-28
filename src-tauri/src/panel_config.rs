@@ -5,12 +5,36 @@ use crate::dtbo_builder::FdtBuilder;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Joypad driver override. ROCKNIX exposes the same three states from its
+/// DTBO server: auto follows the vendor DTB's adc-keys node, K36 forces a
+/// single-ADC button matrix, MyMini forces per-axis ADC channels.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JoypadVariant {
+    #[default]
+    Auto,
+    K36,
+    MyMini,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PanelConfig {
     pub rotation: u32,
     pub invert_left_stick: bool,
     pub invert_right_stick: bool,
     pub hp_invert: bool,
+    /// Joypad driver override (LSi/RSi-equivalent: JPk36 / JPmm).
+    #[serde(default)]
+    pub joypad_variant: JoypadVariant,
+    /// Force "rk817-sound-simple" routing (skip amplifier even if detected).
+    /// Equivalent to ROCKNIX's `SRs` flag.
+    #[serde(default)]
+    pub force_simple_audio: bool,
+    /// Drop the vendor's "default" mode tag from panel_description so the
+    /// kernel picks an FPS based on the generated mode list rather than the
+    /// (sometimes broken) vendor-native mode. Equivalent to `Dno`.
+    #[serde(default)]
+    pub skip_vendor_mode: bool,
 }
 
 impl PanelConfig {
@@ -20,7 +44,69 @@ impl PanelConfig {
             && !self.invert_left_stick
             && !self.invert_right_stick
             && !self.hp_invert
+            && self.joypad_variant == JoypadVariant::Auto
+            && !self.force_simple_audio
+            && !self.skip_vendor_mode
     }
+}
+
+/// Map a base panel DTBO path (e.g. "G80C-MB_V1.1-20250319_Panel_8.dtbo") and
+/// a config to the pre-generated variant name on disk. The build emits 6
+/// variants per panel covering Joypad×Audio overrides; Dno is applied at
+/// runtime in `build_custom_dtbo` and so does not contribute a suffix here.
+pub fn variant_dtbo_path(base_dtbo: &str, config: &PanelConfig) -> String {
+    let (parent, file) = match base_dtbo.rsplit_once('/') {
+        Some((p, f)) => (Some(p), f),
+        None => (None, base_dtbo),
+    };
+    let stem = file.strip_suffix(".dtbo").unwrap_or(file);
+
+    let mut suffix = String::new();
+    match config.joypad_variant {
+        JoypadVariant::K36 => suffix.push_str("_JPk36"),
+        JoypadVariant::MyMini => suffix.push_str("_JPmm"),
+        JoypadVariant::Auto => {}
+    }
+    if config.force_simple_audio {
+        suffix.push_str("_SRs");
+    }
+
+    let new_file = if suffix.is_empty() {
+        file.to_string()
+    } else {
+        format!("{}{}.dtbo", stem, suffix)
+    };
+
+    match parent {
+        Some(p) => format!("{}/{}", p, new_file),
+        None => new_file,
+    }
+}
+
+/// Strip the vendor-default marker (` default=1`) from a panel_description
+/// blob so the kernel doesn't lock onto a vendor-provided mode that the
+/// panel IC can't actually sync to. ROCKNIX exposes the same behaviour as
+/// the `Dno` flag.
+///
+/// `panel_description` is an FDT stringlist (NUL-terminated entries). The
+/// marker is appended to a single `M clock=...` line, optionally followed
+/// by a ` # ...` comment. A literal byte-substring strip is unambiguous
+/// because no other property emitted by the generator contains that token.
+fn strip_vendor_default_marker(panel_desc: &[u8]) -> Vec<u8> {
+    const NEEDLE: &[u8] = b" default=1";
+    let mut out = Vec::with_capacity(panel_desc.len());
+    let mut i = 0;
+    while i < panel_desc.len() {
+        if i + NEEDLE.len() <= panel_desc.len()
+            && &panel_desc[i..i + NEEDLE.len()] == NEEDLE
+        {
+            i += NEEDLE.len();
+        } else {
+            out.push(panel_desc[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Extract the raw `panel_description` property bytes from a panel DTBO.
@@ -50,62 +136,82 @@ pub fn extract_panel_description(dtbo_bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(desc.to_vec())
 }
 
-/// Extract current customization config from an existing mipi-panel.dtbo.
-pub fn extract_config(dtbo_bytes: &[u8]) -> PanelConfig {
-    let fdt = match fdt::Fdt::new(dtbo_bytes) {
+fn find_u32_prop(fdt: &fdt::Fdt, prop_name: &str) -> Option<u32> {
+    fn search<'a>(node: fdt::node::FdtNode<'a, 'a>, name: &str) -> Option<u32> {
+        if let Some(prop) = node.property(name) {
+            if prop.value.len() >= 4 {
+                return Some(u32::from_be_bytes([
+                    prop.value[0], prop.value[1], prop.value[2], prop.value[3],
+                ]));
+            }
+        }
+        for child in node.children() {
+            if let Some(v) = search(child, name) {
+                return Some(v);
+            }
+        }
+        None
+    }
+    let root = fdt.find_node("/")?;
+    search(root, prop_name)
+}
+
+fn has_prop(fdt: &fdt::Fdt, prop_name: &str) -> bool {
+    fn search(node: fdt::node::FdtNode, name: &str) -> bool {
+        if node.property(name).is_some() {
+            return true;
+        }
+        for child in node.children() {
+            if search(child, name) {
+                return true;
+            }
+        }
+        false
+    }
+    match fdt.find_node("/") {
+        Some(root) => search(root, prop_name),
+        None => false,
+    }
+}
+
+/// Extract current customization config from an active mipi-panel.dtbo.
+///
+/// `source_dtbo` is the matching pre-generated overlay (looked up via panel
+/// identification). When provided, stick inversion is decoded relative to the
+/// source's natural state — `invert-abs*` in the active means "user flipped
+/// from default" only when the source did *not* have those properties (and
+/// vice versa). Without the source we fall back to the absolute reading,
+/// which gets K36 vs MyMini wrong but is the best we can do.
+pub fn extract_config(active_bytes: &[u8], source_bytes: Option<&[u8]>) -> PanelConfig {
+    let fdt = match fdt::Fdt::new(active_bytes) {
         Ok(f) => f,
         Err(_) => return PanelConfig::default(),
     };
 
     let mut config = PanelConfig::default();
 
-    // Look for rotation in panel overlay fragment
-    fn find_u32_prop(fdt: &fdt::Fdt, prop_name: &str) -> Option<u32> {
-        fn search<'a>(node: fdt::node::FdtNode<'a, 'a>, name: &str) -> Option<u32> {
-            if let Some(prop) = node.property(name) {
-                if prop.value.len() >= 4 {
-                    return Some(u32::from_be_bytes([
-                        prop.value[0], prop.value[1], prop.value[2], prop.value[3],
-                    ]));
-                }
-            }
-            for child in node.children() {
-                if let Some(v) = search(child, name) {
-                    return Some(v);
-                }
-            }
-            None
-        }
-        let root = fdt.find_node("/")?;
-        search(root, prop_name)
-    }
-
-    fn has_prop(fdt: &fdt::Fdt, prop_name: &str) -> bool {
-        fn search(node: fdt::node::FdtNode, name: &str) -> bool {
-            if node.property(name).is_some() {
-                return true;
-            }
-            for child in node.children() {
-                if search(child, name) {
-                    return true;
-                }
-            }
-            false
-        }
-        match fdt.find_node("/") {
-            Some(root) => search(root, prop_name),
-            None => false,
-        }
-    }
-
     if let Some(rot) = find_u32_prop(&fdt, "rotation") {
         config.rotation = rot;
     }
-    config.invert_left_stick = has_prop(&fdt, "invert-absx");
-    config.invert_right_stick = has_prop(&fdt, "invert-absrx");
-    // HP invert defaults to false. The checkbox means "flip polarity from overlay default".
-    // We can't know if the overlay polarity was already flipped without the original DTB,
-    // so default to false (use overlay as-is).
+
+    let active_has_l = has_prop(&fdt, "invert-absx");
+    let active_has_r = has_prop(&fdt, "invert-absrx");
+
+    let (source_has_l, source_has_r) = match source_bytes.and_then(|b| fdt::Fdt::new(b).ok()) {
+        Some(src) => (has_prop(&src, "invert-absx"), has_prop(&src, "invert-absrx")),
+        // No source — assume default state matches active so checkboxes start unchecked.
+        None => (active_has_l, active_has_r),
+    };
+
+    // The user checkbox means "OS axis inverted from the device default".
+    // That is true exactly when active and source disagree on invert-abs*.
+    config.invert_left_stick = active_has_l ^ source_has_l;
+    config.invert_right_stick = active_has_r ^ source_has_r;
+
+    // HP invert defaults to false: same XOR-from-source logic would apply but
+    // the polarity is encoded inside a single byte of `simple-audio-card,hp-det-gpio`,
+    // not as a separate property, so we'd need to compare cell-by-cell. Keeping
+    // the existing behaviour (default to false) until that comparison is wired up.
     config.hp_invert = false;
 
     config
@@ -173,6 +279,15 @@ fn clone_node_with_config(
         if override_hp && prop.name == "simple-audio-card,hp-det-gpio" {
             continue;
         }
+        // Dno: rewrite the panel_description blob to drop the vendor's
+        // "default" mode marker. Cheaper than regenerating the full mode
+        // list from the vendor DTB and good enough for the practical use
+        // case (panel ICs that fail to sync on the native vendor mode).
+        if has_panel_desc && config.skip_vendor_mode && prop.name == "panel_description" {
+            let stripped = strip_vendor_default_marker(prop.value);
+            builder.prop_bytes(prop.name, &stripped);
+            continue;
+        }
         builder.prop_bytes(prop.name, prop.value);
     }
 
@@ -181,14 +296,19 @@ fn clone_node_with_config(
         builder.prop_u32("rotation", config.rotation);
     }
     if has_joypad {
-        if config.invert_left_stick {
-            builder.prop_u32("invert-absx", 1);
-            builder.prop_u32("invert-absy", 1);
-        }
-        if config.invert_right_stick {
-            builder.prop_u32("invert-absrx", 1);
-            builder.prop_u32("invert-absry", 1);
-        }
+        // The user toggle means "invert OS axis from device default". The DTBO
+        // we cloned encodes the device default (K36 wires include invert-abs*=1
+        // to compensate naturally-inverted sensors; MyMini omits them). XOR
+        // the user's choice with the source state to get the output state.
+        let natural_x  = node.property("invert-absx").is_some();
+        let natural_y  = node.property("invert-absy").is_some();
+        let natural_rx = node.property("invert-absrx").is_some();
+        let natural_ry = node.property("invert-absry").is_some();
+
+        if natural_x  ^ config.invert_left_stick  { builder.prop_u32("invert-absx",  1); }
+        if natural_y  ^ config.invert_left_stick  { builder.prop_u32("invert-absy",  1); }
+        if natural_rx ^ config.invert_right_stick { builder.prop_u32("invert-absrx", 1); }
+        if natural_ry ^ config.invert_right_stick { builder.prop_u32("invert-absry", 1); }
     }
     if override_hp {
         if let Some(prop) = node.property("simple-audio-card,hp-det-gpio") {
@@ -370,7 +490,8 @@ pub fn read_dtbo_from_image(image_path: &Path, panel_dtbo: &str) -> Result<Vec<u
     }
 
     // 3. Read overlays directory and traverse path components
-    //    panel_dtbo can be "panel0.dtbo" or "soysauce/ss_v04.dtbo"
+    //    panel_dtbo is an MB-named overlay, e.g. "R36S-V21_2024-12-18_2551.dtbo"
+    //    or "soysauce/Y3506_V05_20251215_2551.dtbo".
     let parts: Vec<&str> = panel_dtbo.split('/').collect();
     let mut current_data = read_chain(&mut file, overlays_cluster)?;
 
@@ -408,4 +529,75 @@ pub fn write_temp_dtbo(data: &[u8]) -> Result<std::path::PathBuf, String> {
     file.sync_all()
         .map_err(|e| format!("Sync error: {}", e))?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dno_strips_default_marker_inline() {
+        let input = b"G size=52,70 flags=0xe03\0M clock=29000 horizontal=640,46,2,44 vertical=480,165,2,14 default=1\0M clock=29000 horizontal=640,46,24,44 vertical=480,165,111,14\0\0";
+        let out = strip_vendor_default_marker(input);
+        assert!(!out.windows(b" default=1".len()).any(|w| w == b" default=1"),
+            "marker still present in: {:?}", String::from_utf8_lossy(&out));
+        // Other content preserved:
+        assert!(out.starts_with(b"G size=52,70 flags=0xe03\0"));
+        assert!(out.windows(b"M clock=29000 horizontal=640,46,2,44 vertical=480,165,2,14\0".len())
+            .any(|w| w == b"M clock=29000 horizontal=640,46,2,44 vertical=480,165,2,14\0"));
+    }
+
+    #[test]
+    fn dno_strips_default_marker_with_trailing_comment() {
+        let input = b"M clock=29000 vertical=480,165,2,14 default=1 # fps=60.0\0";
+        let out = strip_vendor_default_marker(input);
+        assert_eq!(out, b"M clock=29000 vertical=480,165,2,14 # fps=60.0\0");
+    }
+
+    #[test]
+    fn dno_noop_when_no_marker() {
+        let input = b"G size=52,70 flags=0xe03\0M clock=29000\0\0";
+        let out = strip_vendor_default_marker(input);
+        assert_eq!(out, input.to_vec());
+    }
+
+    #[test]
+    fn variant_path_default_returns_base() {
+        let cfg = PanelConfig::default();
+        assert_eq!(variant_dtbo_path("R36S-V21_2024-12-18_2551.dtbo", &cfg),
+                   "R36S-V21_2024-12-18_2551.dtbo");
+    }
+
+    #[test]
+    fn variant_path_jpmm_only() {
+        let cfg = PanelConfig { joypad_variant: JoypadVariant::MyMini, ..Default::default() };
+        assert_eq!(variant_dtbo_path("R36S-V21_2024-12-18_2551.dtbo", &cfg),
+                   "R36S-V21_2024-12-18_2551_JPmm.dtbo");
+    }
+
+    #[test]
+    fn variant_path_jpk36_plus_srs() {
+        let cfg = PanelConfig {
+            joypad_variant: JoypadVariant::K36,
+            force_simple_audio: true,
+            ..Default::default()
+        };
+        assert_eq!(variant_dtbo_path("R36S-V21_2024-12-18_2551.dtbo", &cfg),
+                   "R36S-V21_2024-12-18_2551_JPk36_SRs.dtbo");
+    }
+
+    #[test]
+    fn variant_path_with_subdir() {
+        let cfg = PanelConfig { force_simple_audio: true, ..Default::default() };
+        assert_eq!(variant_dtbo_path("soysauce/Y3506_V05_20251215_2551.dtbo", &cfg),
+                   "soysauce/Y3506_V05_20251215_2551_SRs.dtbo");
+    }
+
+    #[test]
+    fn variant_path_dno_alone_returns_base() {
+        // Dno is applied at runtime as a string transform, not via a pre-built file.
+        let cfg = PanelConfig { skip_vendor_mode: true, ..Default::default() };
+        assert_eq!(variant_dtbo_path("R36S-V21_2024-12-18_2551.dtbo", &cfg),
+                   "R36S-V21_2024-12-18_2551.dtbo");
+    }
 }

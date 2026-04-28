@@ -411,6 +411,9 @@ async function startFlash() {
       invertLeftStick: $('invert-lstick').checked,
       invertRightStick: $('invert-rstick').checked,
       hpInvert: $('hp-invert').checked,
+      joypadVariant: $('joypad-variant').value || 'auto',
+      forceSimpleAudio: $('force-simple-audio').checked,
+      skipVendorMode: $('skip-vendor-mode').checked,
     });
     $('progress-fill').style.width = '100%';
     $('progress-percent').textContent = '100%';
@@ -510,6 +513,9 @@ async function onOverlaySDSelected(bootPath) {
     $('overlay-invert-lstick').checked = s.invert_left_stick || false;
     $('overlay-invert-rstick').checked = s.invert_right_stick || false;
     $('overlay-hp-invert').checked = s.hp_invert || false;
+    $('overlay-joypad-variant').value = s.joypad_variant || 'auto';
+    $('overlay-force-simple-audio').checked = s.force_simple_audio || false;
+    $('overlay-skip-vendor-mode').checked = s.skip_vendor_mode || false;
 
     if (s.variant) selectOverlayConsole(s.variant);
     setOverlayStatus('', '');
@@ -565,6 +571,9 @@ async function applyOverlay() {
         invertLeftStick: $('overlay-invert-lstick').checked,
         invertRightStick: $('overlay-invert-rstick').checked,
         hpInvert: $('overlay-hp-invert').checked,
+        joypadVariant: $('overlay-joypad-variant').value || 'auto',
+        forceSimpleAudio: $('overlay-force-simple-audio').checked,
+        skipVendorMode: $('overlay-skip-vendor-mode').checked,
       });
     }
 

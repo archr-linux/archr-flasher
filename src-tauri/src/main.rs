@@ -106,6 +106,9 @@ async fn flash_image(
     invert_left_stick: bool,
     invert_right_stick: bool,
     hp_invert: bool,
+    joypad_variant: panel_config::JoypadVariant,
+    force_simple_audio: bool,
+    skip_vendor_mode: bool,
 ) -> Result<String, String> {
     let app_clone = app.clone();
 
@@ -117,14 +120,39 @@ async fn flash_image(
         // 1. Determine decompressed image path (for reading DTBO from FAT32)
         let img_path = std::path::Path::new(&image_path);
 
-        // 2. Read source DTBO from image
-        //    Compressed images (.xz, .gz) must be decompressed first to read FAT32.
+        // 2a. Build the config first so we can pick the right pre-built variant.
+        let config = PanelConfig {
+            rotation,
+            invert_left_stick,
+            invert_right_stick,
+            hp_invert,
+            joypad_variant,
+            force_simple_audio,
+            skip_vendor_mode,
+        };
+
+        // 2b. Resolve the variant DTBO path (joypad/audio overrides live in
+        //     pre-built files; rotation/sticks/HPi/Dno are runtime patches).
+        let variant_path = panel_config::variant_dtbo_path(&panel_dtbo, &config);
+
+        // 2c. Read source DTBO from image. If the requested variant doesn't
+        //     exist on the image (older builds, custom overlays), fall back
+        //     to the base panel name so the user still gets a flash.
         let is_compressed = image_path.ends_with(".xz") || image_path.ends_with(".gz");
+        let read_with_fallback = |img: &std::path::Path| -> Result<Vec<u8>, String> {
+            match panel_config::read_dtbo_from_image(img, &variant_path) {
+                Ok(b) => Ok(b),
+                Err(_) if variant_path != panel_dtbo => {
+                    panel_config::read_dtbo_from_image(img, &panel_dtbo)
+                }
+                Err(e) => Err(e),
+            }
+        };
         let dtbo_bytes = if is_compressed {
             let _ = std::fs::create_dir_all(&cache_dir);
             let temp_img = cache_dir.join("archr-flash-temp.img");
             if temp_img.exists() {
-                panel_config::read_dtbo_from_image(&temp_img, &panel_dtbo)?
+                read_with_fallback(&temp_img)?
             } else {
                 use std::io::{BufReader, Read, Write};
                 let src_file = std::fs::File::open(&image_path)
@@ -154,20 +182,13 @@ async fn flash_image(
                 }
 
                 dst_file.flush().map_err(|e| format!("Flush: {}", e))?;
-                panel_config::read_dtbo_from_image(&temp_img, &panel_dtbo)?
+                read_with_fallback(&temp_img)?
             }
         } else {
-            panel_config::read_dtbo_from_image(img_path, &panel_dtbo)?
+            read_with_fallback(img_path)?
         };
 
         // 3. Build DTBO: use original when no customizations, custom when needed
-        let config = PanelConfig {
-            rotation,
-            invert_left_stick,
-            invert_right_stick,
-            hp_invert,
-        };
-
         let final_dtbo = if config.is_default() {
             // No customizations — use the original DTBO as-is (preserves all
             // hardware nodes: reset-gpios, pinctrl, power supply, __fixups__)
@@ -234,12 +255,18 @@ fn apply_panel_with_config(
     invert_left_stick: bool,
     invert_right_stick: bool,
     hp_invert: bool,
+    joypad_variant: panel_config::JoypadVariant,
+    force_simple_audio: bool,
+    skip_vendor_mode: bool,
 ) -> Result<String, String> {
     let config = PanelConfig {
         rotation,
         invert_left_stick,
         invert_right_stick,
         hp_invert,
+        joypad_variant,
+        force_simple_audio,
+        skip_vendor_mode,
     };
     let result = overlay::apply_overlay_with_config(boot_path, panel_dtbo, &config)?;
 

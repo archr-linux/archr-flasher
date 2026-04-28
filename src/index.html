@@ -95,7 +95,7 @@
             </button>
             <button class="card" data-console="soysauce">
               <strong data-i18n="soysauce_name">R36S Soysauce</strong>
-              <small data-i18n="soysauce_desc">Y3506 - 7 panels</small>
+              <small data-i18n="soysauce_desc">7 panels</small>
             </button>
           </div>
         </div>
@@ -161,6 +161,22 @@
             <div class="setting-row">
               <span data-i18n="hp_invert">Invert HP detect</span>
               <label class="toggle"><input type="checkbox" id="hp-invert"><span class="toggle-track"></span></label>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="joypad_variant">Joypad driver</span>
+              <select id="joypad-variant" class="select-sm">
+                <option value="auto" data-i18n="joypad_auto">Auto</option>
+                <option value="k36" data-i18n="joypad_k36">Force K36</option>
+                <option value="my_mini" data-i18n="joypad_mymini">Force My Mini</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="force_simple_audio">Force simple audio routing</span>
+              <label class="toggle"><input type="checkbox" id="force-simple-audio"><span class="toggle-track"></span></label>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="skip_vendor_mode">Skip vendor display mode</span>
+              <label class="toggle"><input type="checkbox" id="skip-vendor-mode"><span class="toggle-track"></span></label>
             </div>
           </div>
         </div>
@@ -247,6 +263,22 @@
             <div class="setting-row">
               <span data-i18n="hp_invert">Invert HP detect</span>
               <label class="toggle"><input type="checkbox" id="overlay-hp-invert"><span class="toggle-track"></span></label>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="joypad_variant">Joypad driver</span>
+              <select id="overlay-joypad-variant" class="select-sm">
+                <option value="auto" data-i18n="joypad_auto">Auto</option>
+                <option value="k36" data-i18n="joypad_k36">Force K36</option>
+                <option value="my_mini" data-i18n="joypad_mymini">Force My Mini</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="force_simple_audio">Force simple audio routing</span>
+              <label class="toggle"><input type="checkbox" id="overlay-force-simple-audio"><span class="toggle-track"></span></label>
+            </div>
+            <div class="setting-row">
+              <span data-i18n="skip_vendor_mode">Skip vendor display mode</span>
+              <label class="toggle"><input type="checkbox" id="overlay-skip-vendor-mode"><span class="toggle-track"></span></label>
             </div>
           </div>
         </div>

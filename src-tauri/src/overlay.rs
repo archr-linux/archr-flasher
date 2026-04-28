@@ -1,7 +1,7 @@
 //! Overlay management: read/write panel overlays on BOOT partition.
 //! Detects mounted Arch R SD cards and allows changing the active panel overlay.
 
-use crate::panel_config::{self, PanelConfig};
+use crate::panel_config::{self, JoypadVariant, PanelConfig};
 use crate::panels;
 use md5::{Md5, Digest};
 use serde::Serialize;
@@ -20,6 +20,9 @@ pub struct OverlayStatus {
     pub invert_left_stick: bool,
     pub invert_right_stick: bool,
     pub hp_invert: bool,
+    pub joypad_variant: JoypadVariant,
+    pub force_simple_audio: bool,
+    pub skip_vendor_mode: bool,
 }
 
 /// Marker files that identify an Arch R BOOT partition.
@@ -131,6 +134,9 @@ pub fn read_overlay_status(boot_path: &str) -> OverlayStatus {
             invert_left_stick: false,
             invert_right_stick: false,
             hp_invert: false,
+            joypad_variant: JoypadVariant::Auto,
+            force_simple_audio: false,
+            skip_vendor_mode: false,
         };
     }
 
@@ -143,8 +149,17 @@ pub fn read_overlay_status(boot_path: &str) -> OverlayStatus {
 
     let (current_overlay, current_panel_name, config) = if mipi_path.exists() {
         let (overlay, name) = identify_overlay(&mipi_path);
-        let cfg = fs::read(&mipi_path)
-            .map(|data| panel_config::extract_config(&data))
+        let active_bytes = fs::read(&mipi_path).ok();
+        // Source bytes are needed to decode stick inversion relative to the
+        // device's natural state. We loaded them via identify_overlay's hash
+        // match — re-read here from the same overlays/ subtree.
+        let source_bytes = overlay.as_ref().and_then(|rel| {
+            let p = boot.join("overlays").join(rel);
+            fs::read(p).ok()
+        });
+        let cfg = active_bytes
+            .as_ref()
+            .map(|data| panel_config::extract_config(data, source_bytes.as_deref()))
             .unwrap_or_default();
         (overlay, name, cfg)
     } else {
@@ -161,6 +176,9 @@ pub fn read_overlay_status(boot_path: &str) -> OverlayStatus {
         invert_left_stick: config.invert_left_stick,
         invert_right_stick: config.invert_right_stick,
         hp_invert: config.hp_invert,
+        joypad_variant: config.joypad_variant,
+        force_simple_audio: config.force_simple_audio,
+        skip_vendor_mode: config.skip_vendor_mode,
     }
 }
 
@@ -228,15 +246,26 @@ pub fn apply_overlay_with_config(
         return Err("Not an Arch R BOOT partition".to_string());
     }
 
-    // Panel dtbo paths already include subdirectory (e.g. "soysauce/ss_v03.dtbo")
-    let source = boot.join("overlays").join(panel_dtbo);
+    // Resolve the joypad/audio variant before reading. If the requested
+    // variant doesn't exist (e.g. older image, custom panel), fall back to
+    // the base file so the user still gets a result.
+    let variant_path = panel_config::variant_dtbo_path(panel_dtbo, config);
+    let overlays_dir = boot.join("overlays");
+    let source = {
+        let preferred = overlays_dir.join(&variant_path);
+        if preferred.exists() {
+            preferred
+        } else {
+            overlays_dir.join(panel_dtbo)
+        }
+    };
     if !source.exists() {
         return Err(format!("Panel overlay not found: {}", panel_dtbo));
     }
     let target = boot.join("overlays/mipi-panel.dtbo");
 
     let source_data = fs::read(&source)
-        .map_err(|e| format!("Failed to read {}: {}", panel_dtbo, e))?;
+        .map_err(|e| format!("Failed to read {}: {}", source.display(), e))?;
 
     // Use original DTBO when no customizations (preserves all hardware nodes:
     // reset-gpios, pinctrl, power supply, __fixups__). Only build custom DTBO

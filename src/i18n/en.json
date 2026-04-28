@@ -81,7 +81,7 @@
   "invert_rstick": "Invert right stick",
   "hp_invert": "Invert HP detect",
   "soysauce_name": "R36S Soysauce",
-  "soysauce_desc": "Y3506 - {count} panels",
+  "soysauce_desc": "{count} panels",
   "select_console": "Select your console",
   "select_image": "Select image",
   "select_panel_title": "Select panel",
