@@ -9,23 +9,34 @@
 
 ---
 
-Cross-platform desktop app for flashing [Arch R](https://github.com/archr-linux/Arch-R) onto R36S and clone gaming consoles. Handles image download, SD card writing, and display panel configuration in one step.
+Cross-platform desktop app for flashing [Arch R](https://github.com/archr-linux/Arch-R) onto R36S Original, R36S Clone, and Soysauce gaming consoles. Handles image download, SD card writing, and per-motherboard panel configuration in one step.
 
 ## Features
 
 - **Two tabs:** Flash (full image write) and Overlay (change panel on existing SD)
-- **24 display panels:** 12 original R36S + 12 clone variants, data-driven selection
-- **Customizations:** display rotation, analog stick inversion, headphone detect polarity
-- **Image download:** fetches latest release from GitHub with SHA256 verification and caching
-- **Compression support:** handles both `.img.gz` and `.img.xz` images
+- **3 console families, 43 panels:** 15 R36S Original + 18 R36S Clone + 10 Soysauce, named after the exact motherboard revision (e.g. `R36S-V21_2024-12-18_2551.dtbo`)
+- **Custom panel from stock DTB:** import a vendor `.dtb` file and the flasher auto-generates the matching MIPI overlay (pure Rust, no external tools)
+- **Customizations:** display rotation, analog stick inversion (left/right), headphone-detect polarity, joypad variant (auto/oga/ogs), forced simple-audio mode, skip-vendor-mode toggle
+- **Image download:** fetches latest release from GitHub with SHA256 verification (compares against the `.sha256` asset published with the release) and on-disk caching
+- **Compression support:** `.img`, `.img.gz`, and `.img.xz` (streaming decompress, 4 MiB chunks)
 - **Cross-platform:** Windows, Linux, macOS with native privilege escalation
-- **In-app updates:** automatic update checking and installation
+- **In-app updates:** automatic update checking and one-click install
 - **5 languages:** English, Portuguese (BR), Spanish, Chinese, Russian
 - **Retry logic:** automatic retry on transient SD card I/O errors
 
+## System Requirements
+
+| Platform | Minimum |
+|----------|---------|
+| Windows  | **Windows 10 (1809) or later, x86_64.** WebView2 Runtime (pre-installed on Windows 11; on Windows 10 the installer pulls it via the Evergreen Bootstrapper) |
+| Linux    | glibc 2.31+, `webkit2gtk-4.1`, `gtk-3`, `libayatana-appindicator3` |
+| macOS    | macOS 10.15+, Apple Silicon |
+
+> **Windows 7 is not supported.** Both the GUI runtime (Tauri 2 / Microsoft Edge WebView2) and the privileged flash script (PowerShell `Storage` module — `Clear-Disk`, `Get-Partition`, `Update-Disk`) require Windows 8+. Even with the bundled `bcryptprimitives.dll` shim that fixes Rust's `ProcessPrng` import, the WebView and the flash script still fail on Windows 7. Use Linux, macOS, or upgrade to Windows 10/11.
+
 ## Download
 
-Get the latest release for your platform from [Releases](https://github.com/archr-linux/archr-flasher/releases).
+Grab the latest release for your platform from [Releases](https://github.com/archr-linux/archr-flasher/releases).
 
 | Platform | File |
 |----------|------|
@@ -36,64 +47,43 @@ Get the latest release for your platform from [Releases](https://github.com/arch
 
 ## Usage
 
-### Overlays
-
-| Boards                         | Variation           | Overlays                                |
-|--------------------------------|---------------------|-----------------------------------------|
-| R36S-V12 2023-08-18            | Original            | panel0.dtbo                             |
-| R36S-Y02 2024-11-27            | Original            | unknown                                 |
-| R36S-Y02 2025-02-18            | Original            | panel0.dtbo                             |
-| Y3506_V03_20241210             | SoySauce / Original | panel5.dtbo / panel6.dtbo               |
-| Y3506_V03_20241104             | SoySauce / Original | unknown                                 |
-| Y3506_V03_20250317             | SoySauce / Original | panel6.dtbo                             |
-| Y3506_V04_20250529             | SoySauce / Original | panel6.dtbo                             |
-| 2025-07-22_1402                | SoySauce / Original | panel6.dtbo                             |
-| Y3506_V05_20251215 \| 2551     | SoySauce / Original | panel5.dtbo                             |
-| Y3506_V05_20251215 \| 2601     | SoySauce / Original | unknown                                 |
-| R36S-V21 2024-12-18            | Original            | panel4.dtbo                             |
-| R36S-V22 2024-12-18            | Original            | panel4v22.dtbo                          |
-| RK3326-D3                      | Unknown             | panel4.dtbo                             |
-| R36S-V30 2025-10-18            | Original            | unknown                                 |
-| G80C-MB V1.1-20250319          | Clone               | clone_panel_8.dtbo                      |
-| G80CA-MB V1.2-20250422         | Clone               | clone_panel_8.dtbo / clone_panel_9.dtbo |
-| G80CA-MB V1.2-20250423         | Clone               | clone_panel_8.dtbo / clone_panel_9.dtbo |
-| G80CA-MB V1.3-20251212         | Clone               | clone_panel_8.dtbo / clone_panel_9.dtbo |
-| G80D-MB V1.0-20250609          | Clone               | clone_panel_10.dtbo                     |
-| R36S-V12                       | Clone               | clone_panel_8.dtbo                      |
-| R36S-V20 2025-05-18            | Clone               | clone_panel_1.dtbo / clone_panel_3.dtbo |
-| R36S-V20 2025-09-18            | Clone               | unknown                                 |
-| R36S-V12 2023-08-18 variant 1  | Clone               | clone_panel_4.dtbo                      |
-| R36S-V12 2023-08-18 variant 2  | Clone               | clone_panel_2.dtbo                      |
-| R36S-V12 2023-08-18 variant 3A | Clone               | unknown                                 |
-| R36S-V12 2023-08-18 variant 3  | Clone               | clone_panel_1.dtbo                      |
-| R36S-Power-MB 01 - 060625      | Clone               | clone_panel_8.dtbo                      |
-
 ### Flash Tab
 
-1. Select console type -- **R36S Original** (12 panels) or **R36S Clone** (12 panels)
-2. Select image -- download latest from GitHub or pick a local `.img` / `.img.xz` / `.img.gz` file
-3. Select your display panel
-4. Optionally adjust customizations (rotation, stick inversion, HP detect)
-5. Select target SD card
-6. Click **FLASH**
+1. **Console** — pick **R36S Original**, **R36S Clone**, or **Soysauce**
+2. **Image** — download the latest from GitHub, or pick a local `.img` / `.img.xz` / `.img.gz`
+3. **Panel** — select your motherboard revision from the curated list, or import a stock vendor `.dtb` to auto-generate a custom overlay
+4. **Customize** (optional) — rotation, stick inversion, HP invert, joypad variant, simple audio, vendor mode skip
+5. **SD Card** — pick the target removable disk
+6. **Flash**
 
-The app decompresses images, writes to SD, and injects the correct panel overlay (DTBO) into the BOOT partition.
+The app decompresses the image, writes it to the SD card with retries, then mounts the BOOT partition and injects the chosen DTBO as `overlays/mipi-panel.dtbo`.
 
 ### Overlay Tab
 
 Change the display panel on an already-flashed Arch R SD card without reflashing:
 
 1. Insert an Arch R SD card
-2. App auto-detects the BOOT partition and shows current panel + settings
+2. App auto-detects the BOOT partition and shows the current panel + settings
 3. Select a new panel and/or adjust customizations
-4. Click **APPLY**
+4. **Apply**
+
+### Custom panel from a stock DTB
+
+If your motherboard revision isn't in the curated list, drop in any working stock `r36s.dtb` (extracted from the vendor's image or pulled from `/sys/firmware/fdt`):
+
+1. In the Panel step, choose **Import DTB → generate overlay**
+2. Pick the `.dtb` file
+3. The flasher's pure-Rust DTB→overlay generator extracts the MIPI panel node and produces a minimal DTBO at `<cache>/com.archr.flasher/custom-overlay.dtbo`
+4. That overlay is applied like any built-in panel
+
+No `dtc`, `mtools`, or device-tree-compiler needed at any step.
 
 ## Building from Source
 
 ### Requirements
 
-- [Rust](https://rustup.rs/) (stable)
-- Tauri CLI: `cargo install tauri-cli`
+- [Rust](https://rustup.rs/) (stable, edition 2024 — Rust 1.85+)
+- Tauri CLI: `cargo install tauri-cli --version "^2"`
 
 #### Linux
 
@@ -107,7 +97,7 @@ Xcode Command Line Tools.
 
 #### Windows
 
-[WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 11).
+[WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 11; the installer auto-pulls it on Windows 10). MSVC toolchain via Visual Studio Build Tools.
 
 ### Build
 
@@ -119,6 +109,8 @@ cargo tauri dev
 cargo tauri build
 ```
 
+The Windows build also compiles `src/win7_shim.c` into a fallback `bcryptprimitives.dll` next to the `.exe`. This shim is harmless on Windows 8+ (forwards calls to the real system DLL) and would be required on Windows 7 — but the Tauri 2 WebView and the PS `Storage` module make Win7 unfeasible regardless. The shim ships only because the build pipeline keeps it for diagnostic builds.
+
 ## Architecture
 
 ```
@@ -126,15 +118,19 @@ archr-flasher/
  src-tauri/
    src/
      main.rs            # Tauri entry point + IPC commands
-     panels.rs          # Panel definitions (24 panels, data-driven)
+     panels.rs          # Panel definitions (43 panels, data-driven)
      disk.rs            # Removable disk detection (Linux/macOS/Windows)
      flash.rs           # Image writing + privilege escalation + retry
-     github.rs          # GitHub Releases API + image download
+     github.rs          # GitHub Releases API + image download + SHA256 verify
      overlay.rs         # SD card panel overlay read/write
      panel_config.rs    # DTBO read/customization (built-in FAT32 reader)
      dtbo_builder.rs    # FDT binary builder (no external tools)
+     dtb_to_overlay.rs  # Stock DTB → MIPI overlay generator (pure Rust)
+     win7_shim.c        # Win7 ProcessPrng fallback DLL (compiled by build.rs)
+   build.rs
    Cargo.toml
    tauri.conf.json
+   admin.manifest       # Windows UAC elevation manifest
  src/
    index.html           # UI (two tabs: Flash + Overlay)
    style.css            # Dark theme
@@ -147,18 +143,18 @@ archr-flasher/
 ### How It Works
 
 **Flash flow:**
-1. Download or select `.img.xz` / `.img.gz` image
-2. Decompress to app cache directory (streaming, 4MB chunks)
-3. Read source panel DTBO from image's FAT32 BOOT partition
-4. If customizations are set, build a modified DTBO with injected properties
-5. Write image to SD card via platform-specific privileged script (3 retries)
-6. Mount boot partition (with retry) and inject DTBO as `overlays/mipi-panel.dtbo`
+1. Download (with SHA256 verify) or select `.img.xz` / `.img.gz` / `.img`
+2. Stream-decompress to app cache directory (4 MiB chunks)
+3. Detect panel selection: built-in DTBO from the image's FAT32 BOOT partition, or a custom DTBO from disk (when the user imported a stock DTB)
+4. If customizations are set, build a modified DTBO with injected DT properties (preserving original hardware nodes: reset-gpios, pinctrl, power supply, `__fixups__`)
+5. Write image to SD card via platform-specific privileged script (with retries)
+6. Mount BOOT partition (with retry) and inject DTBO as `overlays/mipi-panel.dtbo`
 
 **Overlay flow:**
-1. Detect mounted Arch R BOOT partition
-2. Read current `mipi-panel.dtbo` -- identify panel via `panel_description` hash
-3. User selects new panel + customizations
-4. Build DTBO and write to `overlays/mipi-panel.dtbo`
+1. Detect a mounted Arch R BOOT partition
+2. Read current `mipi-panel.dtbo` — identify panel via `panel_description` hash
+3. User picks a new panel (built-in or custom DTB) + customizations
+4. Build DTBO and write it back to `overlays/mipi-panel.dtbo`
 
 ### Privilege Escalation
 
@@ -166,47 +162,11 @@ archr-flasher/
 |----------|--------|-------|
 | Linux | `pkexec` | No terminal window needed |
 | macOS | `osascript` (AppleScript) | Native admin prompt |
-| Windows | Admin manifest at startup | No runtime UAC prompt |
+| Windows | Admin manifest at startup (Rufus-style) | App is launched elevated; no runtime UAC popup, no visible PowerShell console |
 
 ### Panel DTBO System
 
-The app includes a built-in FDT binary builder and a minimal FAT32 reader -- no `dtc`, `mtools`, or device-tree-compiler dependency needed. Customizations (rotation, stick inversion, HP detect polarity) are injected as DT properties into the panel overlay, preserving all original hardware nodes (reset-gpios, pinctrl, power supply).
-
-## Supported Panels
-
-### Original R36S (12 panels)
-
-| Panel | Overlay |
-|-------|---------|
-| Panel 0 | panel0.dtbo |
-| Panel 1 | panel1.dtbo |
-| Panel 2 | panel2.dtbo |
-| Panel 3 | panel3.dtbo |
-| Panel 4 | panel4.dtbo |
-| Panel 4 V22 | panel4-v22.dtbo |
-| Panel 5 | panel5.dtbo |
-| Panel 6 | panel6.dtbo |
-| R35S Rumble | r35s-rumble.dtbo |
-| R36S Plus | r36s-plus.dtbo |
-| R46H (1024x768) | r46h.dtbo |
-| RGB20S | rgb20s.dtbo |
-
-### Clone R36S (12 panels)
-
-| Panel | Overlay |
-|-------|---------|
-| Clone 1 (ST7703) | clone_panel_1.dtbo |
-| Clone 2 (ST7703) | clone_panel_2.dtbo |
-| Clone 3 (NV3051D) | clone_panel_3.dtbo |
-| Clone 4 (NV3051D) | clone_panel_4.dtbo |
-| Clone 5 (ST7703) | clone_panel_5.dtbo |
-| Clone 6 (NV3051D) | clone_panel_6.dtbo |
-| Clone 7 (JD9365DA) | clone_panel_7.dtbo |
-| Clone 8 G80CA (ST7703) | clone_panel_8.dtbo |
-| Clone 9 (NV3051D) | clone_panel_9.dtbo |
-| Clone 10 (ST7703) | clone_panel_10.dtbo |
-| R36 Max (ST7703 720x720) | r36_max.dtbo |
-| RX6S (NV3051D) | rx6s.dtbo |
+The app ships a built-in FDT binary builder, a minimal FAT32 reader, and a DTB→overlay generator — no `dtc`, `mtools`, or `device-tree-compiler` dependency. Customizations (rotation, stick inversion, HP polarity, joypad variant, simple audio, skip vendor mode) are injected as DT properties into the panel overlay, preserving every original hardware node so the device boots identically to the vendor image.
 
 ## Licenses
 
