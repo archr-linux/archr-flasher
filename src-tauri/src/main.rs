@@ -135,9 +135,82 @@ async fn flash_image(
         //     pre-built files; rotation/sticks/HPi/Dno are runtime patches).
         let variant_path = panel_config::variant_dtbo_path(&panel_dtbo, &config);
 
-        // 2c. Read source DTBO from image. If the requested variant doesn't
-        //     exist on the image (older builds, custom overlays), fall back
-        //     to the base panel name so the user still gets a flash.
+        // 2c. Custom overlay flow: when the user picked "Custom" the frontend
+        //     sends an absolute filesystem path to a generated DTBO instead of
+        //     a panel name relative to overlays/. Read it directly from disk
+        //     and skip the image lookup entirely.
+        let custom_dtbo_path = std::path::Path::new(&panel_dtbo);
+        if custom_dtbo_path.is_absolute() && custom_dtbo_path.is_file() {
+            let dtbo_bytes = std::fs::read(custom_dtbo_path)
+                .map_err(|e| format!("Cannot read custom overlay: {}", e))?;
+            let final_dtbo = if config.is_default() {
+                dtbo_bytes
+            } else {
+                panel_config::build_custom_dtbo(&dtbo_bytes, &config)?
+            };
+            let dtbo_path = panel_config::write_temp_dtbo(&final_dtbo)?;
+
+            let is_compressed = image_path.ends_with(".xz") || image_path.ends_with(".gz");
+            let flash_image_path = if is_compressed {
+                let _ = std::fs::create_dir_all(&cache_dir);
+                let temp_img = cache_dir.join("archr-flash-temp.img");
+                if temp_img.exists() {
+                    let stale = match (std::fs::metadata(&image_path), std::fs::metadata(&temp_img)) {
+                        (Ok(src), Ok(cached)) => match (src.modified(), cached.modified()) {
+                            (Ok(s), Ok(c)) => s > c,
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                    if stale { let _ = std::fs::remove_file(&temp_img); }
+                }
+                if !temp_img.exists() {
+                    use std::io::{BufReader, Read, Write};
+                    let src_file = std::fs::File::open(&image_path)
+                        .map_err(|e| format!("Cannot open image: {}", e))?;
+                    let mut dst_file = std::fs::File::create(&temp_img)
+                        .map_err(|e| format!("Cannot create temp: {}", e))?;
+                    let mut buf = vec![0u8; 4 * 1024 * 1024];
+                    if image_path.ends_with(".xz") {
+                        let mut decoder = xz2::read::XzDecoder::new(BufReader::new(src_file));
+                        loop {
+                            let n = decoder.read(&mut buf).map_err(|e| format!("Decompress error: {}", e))?;
+                            if n == 0 { break; }
+                            dst_file.write_all(&buf[..n]).map_err(|e| format!("Write error: {}", e))?;
+                        }
+                    } else {
+                        let mut decoder = flate2::read::GzDecoder::new(BufReader::new(src_file));
+                        loop {
+                            let n = decoder.read(&mut buf).map_err(|e| format!("Decompress error: {}", e))?;
+                            if n == 0 { break; }
+                            dst_file.write_all(&buf[..n]).map_err(|e| format!("Write error: {}", e))?;
+                        }
+                    }
+                    dst_file.flush().map_err(|e| format!("Flush: {}", e))?;
+                }
+                temp_img.to_string_lossy().to_string()
+            } else {
+                image_path.clone()
+            };
+
+            flash::flash_image_privileged(
+                &app_clone,
+                &flash_image_path,
+                &device,
+                dtbo_path.to_str().unwrap_or(""),
+                &variant,
+            )?;
+
+            let _ = std::fs::remove_file(&dtbo_path);
+            if is_compressed {
+                let _ = std::fs::remove_file(cache_dir.join("archr-flash-temp.img"));
+            }
+            return Ok("Flash complete".into());
+        }
+
+        // 2d. Read source DTBO from image. If the requested variant doesn't
+        //     exist on the image (older builds), fall back to the base panel
+        //     name so the user still gets a flash.
         let is_compressed = image_path.ends_with(".xz") || image_path.ends_with(".gz");
         let read_with_fallback = |img: &std::path::Path| -> Result<Vec<u8>, String> {
             match panel_config::read_dtbo_from_image(img, &variant_path) {
