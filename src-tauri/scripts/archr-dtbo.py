@@ -71,7 +71,12 @@ def panel_to_desc(panel, args):
                 ]
 
         mode = {'clock': clock, 'hor': hor, 'ver': ver}
-        if (m.get_property("phandle").value == native):
+        # Some vendor DTBs (e.g. R36S-V20 2025-05-18) omit `phandle` on
+        # individual modes. A mode without a phandle can't be the native
+        # default, so skip the comparison instead of crashing.
+        phandle_prop = m.get_property("phandle")
+        is_native = phandle_prop is not None and phandle_prop.value == native
+        if is_native:
             mode['default'] = True
 
         htotal = sum(hor)
@@ -80,7 +85,7 @@ def panel_to_desc(panel, args):
 
         if fps not in modes:
             modes[fps] = mode
-        if (m.get_property("phandle").value == native):
+        if is_native:
             modes[fps]['default'] = True
             orig_def_fps = fps
 
@@ -303,6 +308,249 @@ def switch_joypad_to_mymini(overlay, jp_ovl):
     jp_ovl.set_property('poll-interval', 10)
 
 
+def copy_gpio_prop(dt, symbols, overlay, src_node, prop_name, ovl_target_path):
+    """Propagate a *-gpios property from `src_node` (vendor DTB) into the
+    overlay at `ovl_target_path`, attaching the correct __fixup__ so the
+    bootloader resolves the phandle against the live base DTB.
+
+    Returns True on success, False if the property is absent or the
+    referenced controller cannot be resolved. Logs nothing — caller can
+    decide whether to warn.
+    """
+    if not src_node.exist_property(prop_name):
+        return False
+    try:
+        data = src_node.get_property(prop_name).data
+    except Exception:
+        return False
+    if not data or len(data) < 3:
+        return False
+    try:
+        gpio_path = resolve_phandle(dt, data[0])
+        gpio_sym = next(p.name for p in symbols.props if p.value == gpio_path)
+    except (StopIteration, Exception):
+        return False
+    overlay.set_property(prop_name, [0xffffffff, data[1], data[2]],
+                         path=ovl_target_path)
+    add_fixup(overlay, gpio_sym, ovl_target_path + ':' + prop_name + ':0')
+    return True
+
+
+def extract_joypad_wiring(dt, overlay, jp_ovl, args, symbols):
+    """Propagate vendor-specific joypad wiring to the overlay:
+      * amux-a-gpios, amux-b-gpios, amux-en-gpios  (root joypad node)
+      * gpios on each swN child (per-button)
+      * button-adc-{deadzone,fuzz,flat} when vendor differs from defaults
+
+    These vary per board family: clone uses pins 16/15/11, original
+    uses 11/8/13, soysauce uses 13/12/17. The button GPIOs vary even
+    more (different banks). Without this propagation the merged DTB
+    keeps our base's "original" wiring and clone/soysauce hardware
+    boots with all buttons mapped to wrong pins.
+    """
+    try:
+        jp = dt.get_node('/odroidgo3-joypad')
+    except Exception:
+        return
+
+    ovl_root = jp_ovl.path + '/__overlay__'
+
+    # amux selectors
+    for prop in ('amux-a-gpios', 'amux-b-gpios', 'amux-en-gpios'):
+        if copy_gpio_prop(dt, symbols, overlay, jp, prop, ovl_root):
+            data = jp.get_property(prop).data
+            args['logger'].info(f"{prop} pin={data[1]} flags={data[2]} on {ovl_root}")
+
+    # per-button gpios (sw1..sw22 etc.)
+    button_count = 0
+    for sw_node in jp.nodes:
+        name = sw_node.name
+        if not name.startswith('sw'):
+            continue
+        target = ovl_root + '/' + name
+        if copy_gpio_prop(dt, symbols, overlay, sw_node, 'gpios', target):
+            button_count += 1
+    if button_count:
+        args['logger'].info(f"propagated {button_count} per-button gpios on {ovl_root}")
+
+    # button-adc tunings — only emit override if vendor differs from
+    # the default our base ships. Saves overlay size for the common case.
+    BUTTON_ADC_DEFAULTS = {
+        'button-adc-deadzone': 96,
+        'button-adc-fuzz':     48,
+        'button-adc-flat':     48,
+    }
+    for prop, default in BUTTON_ADC_DEFAULTS.items():
+        if not jp.exist_property(prop):
+            continue
+        val = jp.get_property(prop).value
+        if val != default:
+            overlay.set_property(prop, val, path=ovl_root)
+            args['logger'].info(f"{prop}={val} (vendor differs from default {default})")
+
+    # rumble-gpio: some clone boards (R36S V20 2025-05-18 batch, GR36)
+    # expose a dedicated GPIO that gates the rumble motor — without
+    # propagating it the motor sits in its default state, which on
+    # those boards is "on" (= constant vibration). The audit across
+    # 44 vendor DTBs flagged this in Tier 3; we handle it explicitly
+    # here so the overlay carries the right pin and the bootloader
+    # phandle fixup resolves against our GPIO controller.
+    if copy_gpio_prop(dt, symbols, overlay, jp, 'rumble-gpio', ovl_root):
+        data = jp.get_property('rumble-gpio').data
+        args['logger'].info(f"rumble-gpio pin={data[1]} flags={data[2]} on {ovl_root}")
+
+
+# ---------- Tier 3: auto-discovery of custom vendor properties --------------
+#
+# Some vendor BSPs ship board-specific properties we never planned for
+# (rumble-direction-fix, special-button-quirk, custom-trigger-mode, ...).
+# The "extract every known prop" approach leaves those on the cutting
+# room floor. Tier 3 walks the vendor tree, identifies anything we don't
+# already handle, and propagates it to the overlay — with logging so
+# the user knows exactly which non-standard props came along.
+
+# Props we ALREADY handle via dedicated extraction logic above; don't
+# touch them in the auto-discovery pass.
+_KNOWN_PANEL_PROPS = frozenset({
+    'compatible', 'reg', 'phandle', 'linux,phandle', 'status',
+    'panel_description', 'panel-init-sequence', 'panel-exit-sequence',
+    'display-timings', 'rotation',
+    'dsi,format', 'dsi,lanes', 'dsi,flags', 'dsi,burst-mode', 'dsi,sync-mode',
+    'prepare-delay-ms', 'reset-delay-ms', 'init-delay-ms',
+    'enable-delay-ms', 'disable-delay-ms', 'unprepare-delay-ms',
+    'width-mm', 'height-mm', 'bus-format', 'bpc',
+    'reset-gpios', 'enable-gpios',
+    'led-red-gpios', 'led-green-gpios',
+    'led-blue1-gpios', 'led-blue2-gpios',
+    'iovcc-supply', 'vdd-supply', 'vsp-supply', 'vsn-supply',
+    'vcc-supply', 'power-supply', 'backlight', 'backlight-supply',
+})
+
+_KNOWN_JOYPAD_PROPS = frozenset({
+    'compatible', 'reg', 'phandle', 'linux,phandle', 'status',
+    'pinctrl-names', 'pinctrl-0', 'pinctrl-1',
+    'io-channel-names', 'io-channels',
+    'amux-count', 'amux-channel-mapping',
+    'amux-a-gpios', 'amux-b-gpios', 'amux-en-gpios',
+    'button-adc-deadzone', 'button-adc-fuzz', 'button-adc-flat',
+    'button-adc-scale', 'button-adc-tuned-scale',
+    'abs_x-p-tuning', 'abs_x-n-tuning', 'abs_y-p-tuning', 'abs_y-n-tuning',
+    'abs_rx-p-tuning', 'abs_rx-n-tuning', 'abs_ry-p-tuning', 'abs_ry-n-tuning',
+    'abs-x-p-tuned-val', 'abs-x-n-tuned-val',
+    'abs-y-p-tuned-val', 'abs-y-n-tuned-val',
+    'abs-rx-p-tuned-val', 'abs-rx-n-tuned-val',
+    'abs-ry-p-tuned-val', 'abs-ry-n-tuned-val',
+    'abs-left-first', 'poll-interval',
+    'invert-absx', 'invert-absy', 'invert-absrx', 'invert-absry',
+    'swap-absxy', 'swap-absrxy', 'vendor-direction',
+    'rumble-boost-weak', 'rumble-boost-strong',
+    'rumble-gpio',
+    'pwms', 'pwm-names',
+    'key-gpios',
+})
+
+_KNOWN_SW_PROPS = frozenset({
+    'gpios', 'phandle', 'linux,phandle',
+    'amux-channel',
+})
+
+# Props that must NEVER be propagated from vendor, even if discovered.
+# Either userspace expects our specific value (joypad-name, linux,code)
+# or our base intentionally diverges (regulator ranges for OC).
+_BLACKLIST = frozenset({
+    'joypad-name', 'joypad-product', 'joypad-revision',
+    'linux,code', 'label',
+    'regulator-min-microvolt', 'regulator-max-microvolt',
+    'regulator-ramp-delay', 'regulator-initial-mode',
+    'regulator-always-on', 'regulator-boot-on',
+})
+
+
+def _prop_is_phandle_array(prop):
+    """Heuristic: PropWords with values that look like phandles (small
+    positive integers, multiple entries). Without knowing the exact
+    layout (#xxx-cells) we can't remap; skip these and let the user
+    add manual support if needed."""
+    if not isinstance(prop, fdt.PropWords):
+        return False
+    # Common phandle arrays have 2-4 cells per entry; single-cell
+    # numerics (delays, sizes) are safe to copy.
+    if len(prop.data) <= 1:
+        return False
+    # If every value is small (< 0x1000), it's likely a numeric tuning
+    # array; if any is "large" (>= 0x10), it's likely a phandle. Soft
+    # rule but works for the props we've seen in the wild.
+    return any(v >= 0x10 for v in prop.data)
+
+
+def _set_prop_on_overlay(overlay, prop, ovl_target_path):
+    """Copy a Property to the overlay tree at the given path. Handles
+    the three concrete subclasses of fdt.Property we care about."""
+    if isinstance(prop, fdt.PropStrings):
+        overlay.set_property(prop.name, prop.data, path=ovl_target_path)
+    elif isinstance(prop, fdt.PropWords):
+        overlay.set_property(prop.name, prop.data, path=ovl_target_path)
+    elif isinstance(prop, fdt.PropBytes):
+        overlay.set_property(prop.name, bytes(prop.data), path=ovl_target_path)
+    elif hasattr(prop, 'value') and prop.value is None:
+        # Boolean-style empty property
+        overlay.set_property(prop.name, True, path=ovl_target_path)
+    else:
+        # Unknown type — skip rather than crash
+        return False
+    return True
+
+
+def auto_discover_custom(dt, overlay, panel_ovl, jp_ovl, args):
+    """Walk panel + joypad + sw* subnodes in the vendor DTB. Any prop
+    not in our known/handled set and not blacklisted gets propagated
+    to the overlay. Phandle arrays are skipped (would need remap that
+    we don't have layout info for). Logs each discovery."""
+    discoveries = []
+
+    def _visit(node, known_set, ovl_target_path, scope_label):
+        for p in node.props:
+            if p.name in known_set or p.name in _BLACKLIST:
+                continue
+            if _prop_is_phandle_array(p):
+                args['logger'].info(
+                    f"auto-discovery: skip {scope_label}/{p.name} "
+                    f"(phandle array, layout unknown)")
+                continue
+            if _set_prop_on_overlay(overlay, p, ovl_target_path):
+                val = p.value if hasattr(p, 'value') else '<binary>'
+                discoveries.append((scope_label, p.name, val))
+
+    # Panel
+    try:
+        panel = dt.get_node('/dsi@ff450000/panel@0')
+        panel_ovl_path = panel_ovl.path + '/__overlay__/dsi@ff450000/panel@0'
+        _visit(panel, _KNOWN_PANEL_PROPS, panel_ovl_path, 'panel')
+    except Exception:
+        pass
+
+    # Joypad root
+    try:
+        jp = dt.get_node('/odroidgo3-joypad')
+        jp_ovl_path = jp_ovl.path + '/__overlay__'
+        _visit(jp, _KNOWN_JOYPAD_PROPS, jp_ovl_path, 'joypad')
+        # And each sw* subnode
+        for sw in jp.nodes:
+            if not sw.name.startswith('sw'):
+                continue
+            _visit(sw, _KNOWN_SW_PROPS, jp_ovl_path + '/' + sw.name,
+                   f'joypad/{sw.name}')
+    except Exception:
+        pass
+
+    if discoveries:
+        args['logger'].info(
+            f"auto-discovery: propagated {len(discoveries)} custom vendor props")
+        for scope, name, val in discoveries:
+            args['logger'].info(f"  custom: {scope}/{name} = {val!r}")
+    return discoveries
+
+
 def make_dtbo(dtb_data, args):
     dt = fdt.parse_dtb(dtb_data)
     symbols = dt.get_node('__symbols__')
@@ -337,8 +585,17 @@ def make_dtbo(dtb_data, args):
 
     compat = dt.get_node('/').get_property('compatible').data[0]
     args['logger'].info(f"compatible {compat}")
-    if 'odroidgo3' in compat:
-        # quick return for well supported R36s
+    # Original-only short-circuit: the original kernel DTB (rk3326-odroid-go2)
+    # already has the correct reset-gpios, power-supply and backlight wiring,
+    # so the DTBO only needs panel description/timings/init-sequence.
+    #
+    # Gate by subdevice (passed as 'SDORIG' from generator.sh), NOT by vendor
+    # compatible alone: several clone vendor DTBs (e.g. G80CA V1.2 04-22/04-23
+    # Panel 8 and 9, G80C V1.1 Panel 9) ship with
+    # `compatible = "rockchip,rk3326-odroidgo3-linux"` despite being clone
+    # hardware. Trusting that string skipped the GPIO overrides on clones and
+    # produced the "backlight on, no image" black screen on those boards.
+    if 'SDORIG' in args['flags'] and 'odroidgo3' in compat:
         return overlay.to_dtb()
 
     # copy reset config
@@ -372,19 +629,33 @@ def make_dtbo(dtb_data, args):
     except:
         pass
 
+    # Soysauce Y3506 V04+/V05 boards have status LEDs on the panel
+    # itself (red + blue1/blue2/green) used for battery/charging
+    # indication. Tier 3 audit flagged these in 8 vendor DTBs. Without
+    # propagation the LED GPIOs default to the bootloader state — on
+    # most boards they end up "on", giving the user a permanent red
+    # light that doesn't react to charging state. Each is a standard
+    # <phandle pin flags> triple, same layout as reset-gpios.
+    for led_prop in ('led-red-gpios', 'led-green-gpios',
+                     'led-blue1-gpios', 'led-blue2-gpios'):
+        if copy_gpio_prop(dt, symbols, overlay, panel, led_prop, panel_ovl_path):
+            data = panel.get_property(led_prop).data
+            args['logger'].info(f"panel {led_prop} pin={data[1]} flags={data[2]}")
 
-    # If stock DTB does not have ADC keys, disable adc-keys in overlay
+
+    # If the vendor DTB explicitly disables /adc-keys, mirror that decision
+    # in the overlay. We deliberately do NOT treat "/adc-keys absent" as
+    # MyMini hardware: most ArchR vendor DTBs are partial extractions that
+    # don't ship that node even when the underlying board has K36-style
+    # single-ADC sticks. Auto-detecting MyMini from absence broke input on
+    # every K36 R36S in our 43-board set. Default is K36 unless JPmm is
+    # explicitly requested or /adc-keys is present-but-disabled.
     need_adckeys_disable = False
-    if not dt.exist_node('/adc-keys'):
-        need_adckeys_disable = True
-    else:
+    if dt.exist_node('/adc-keys'):
         adckeys_orig = dt.get_node('/adc-keys')
         adckeys_status = adckeys_orig.get_property('status')
         if (adckeys_status) and (adckeys_status.value == 'disabled'):
             need_adckeys_disable = True
-        else:
-            # usually we just don't have status property, so consider this valid
-            need_adckeys_disable = False
     if need_adckeys_disable:
         noadck_ovl = add_overlay(overlay, '/')
         overlay.set_property('dtbo_comment', 'deliberately-disabled-adc-keys', path=noadck_ovl.path+'/__overlay__/adc-keys')
@@ -422,6 +693,13 @@ def make_dtbo(dtb_data, args):
         jp_ovl.set_property('invert-absry', 1)
         args['logger'].info(f"invert right stick on {jp_ovl.path}")
 
+    # Propagate the vendor's joypad hardware wiring (amux pins, per-button
+    # GPIOs, ADC tunings). Without this, clone and soysauce boards inherit
+    # the "original" base layout and end up with controls all over the
+    # place — see audit_all.py for the pin matrix across the 44 vendor
+    # DTBs we ship.
+    extract_joypad_wiring(dt, overlay, jp_ovl, args, symbols)
+
 
     try:
         snd = dt.get_node('/rk817-sound')
@@ -442,10 +720,24 @@ def make_dtbo(dtb_data, args):
 
         force_simple_audio_routing = ('SRs' in args['flags'])
 
+        # Detect amplifier GPIO. Direct `spk-con-gpio` on the sound node is
+        # the legacy path. Newer R36S clones (post-2025-03-18 batches) wire
+        # the amplifier through `rockchip,codec/spk-ctl-gpios` instead, so
+        # we follow the codec phandle as a fallback.
+        amp_gpio = None
+        if not force_simple_audio_routing:
+            if snd.exist_property('spk-con-gpio'):
+                amp_gpio = snd.get_property('spk-con-gpio').data
+            elif snd.exist_property('rockchip,codec'):
+                snd_codec_ph = snd.get_property('rockchip,codec').value
+                snd_codec_path = resolve_phandle(dt, snd_codec_ph)
+                snd_codec = dt.get_node(snd_codec_path)
+                if snd_codec.exist_property('spk-ctl-gpios'):
+                    amp_gpio = snd_codec.get_property('spk-ctl-gpios').data
+
         # Determine preset, configure amplifier if needed
-        if snd.exist_property('spk-con-gpio') and not force_simple_audio_routing:
+        if amp_gpio:
             rk817_path = hpdet_ovl.path+'/__overlay__/rk817-sound-amplified'
-            amp_gpio = snd.get_property('spk-con-gpio').data
             amp_gpio_sym = [p.name for p in symbols.props if p.value == resolve_phandle(dt, amp_gpio[0])][0]
             gpio_num = int(amp_gpio_sym[4:])
             args['logger'].info(f"spk-con-gpio {amp_gpio_sym} {amp_gpio[1]} on {hpdet_ovl.path}")
@@ -480,6 +772,12 @@ def make_dtbo(dtb_data, args):
 
     except Exception as e:
         args['logger'].info(e)
+
+    # Tier 3: walk any remaining vendor properties we haven't already
+    # handled and propagate them. Catches board-specific quirks (custom
+    # rumble flags, exotic input properties, etc.) without us needing
+    # to hardcode every possible vendor invention.
+    auto_discover_custom(dt, overlay, panel_ovl, jp_ovl, args)
 
     # Move fixups to the very end (if any)
     if overlay.exist_node('__fixups__'):
