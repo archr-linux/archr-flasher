@@ -106,6 +106,7 @@
   "panel_disclaimer_ok": "好的，我知道了",
   "panel_hint": "选择与您设备屏幕匹配的面板。",
   "custom_dtb": "从自定义 DTB 生成...",
+  "online_generator": "在线覆盖层生成器",
   "custom_dtb_hint": "提供您自己的原始固件 DTB 来生成覆盖层。",
   "custom_dtb_selected": "自定义 DTB：{file}",
   "custom_dtb_generating": "正在从 {file} 生成覆盖层...",

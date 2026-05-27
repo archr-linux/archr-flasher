@@ -100,6 +100,7 @@
   "panel_disclaimer_ok": "OK, got it",
   "panel_hint": "Choose the panel that matches your device screen.",
   "custom_dtb": "Generate from custom DTB...",
+  "online_generator": "Online Overlay Generator",
   "custom_dtb_hint": "Provide your own stock firmware DTB to generate an overlay.",
   "custom_dtb_selected": "Custom DTB: {file}",
   "custom_dtb_generating": "Generating overlay from {file}...",

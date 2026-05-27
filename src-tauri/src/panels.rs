@@ -53,7 +53,7 @@ const PANELS_CLONE: &[(&str, &str, &str)] = &[
     ("R36S_V20_2549",     "R36S V20 2549 (2025-05-18)",          "R36S-V20_2025-05-18_2549.dtbo"),
 ];
 
-/// Soysauce R36S panels (10 Y3506 motherboard revisions).
+/// Soysauce R36S panels (11 Y3506 motherboard revisions).
 /// DTBO paths include the "soysauce/" prefix because original images keep
 /// the soysauce overlays in /overlays/soysauce/ on the boot partition.
 const PANELS_SOYSAUCE: &[(&str, &str, &str)] = &[
@@ -61,6 +61,7 @@ const PANELS_SOYSAUCE: &[(&str, &str, &str)] = &[
     ("SS_V03_1210_2507", "Y3506 V03 2507 (2024-12-10)",     "soysauce/Y3506_v03_20241210_2507.dtbo"),
     ("SS_V03_1210_2533", "Y3506 V03 2533 (2024-12-10)",     "soysauce/Y3506_v03_20241210_2533.dtbo"),
     ("SS_V03_0317",      "Y3506 V03 (2025-03-17)",          "soysauce/Y3506_V03_20250317.dtbo"),
+    ("SS_V04_2528",      "Y3506 V04 2528 (2025-05-29)",     "soysauce/Y3506_V04_20250529_2528.dtbo"),
     ("SS_V04_253x_P6",   "Y3506 V04 253x Panel 6",          "soysauce/Y3506_V04_20250529_253x_Panel_6.dtbo"),
     ("SS_V04_253x_P7",   "Y3506 V04 253x Panel 7",          "soysauce/Y3506_V04_20250529_253x_Panel_7.dtbo"),
     ("SS_V04_2548",      "Y3506 V04 2548 (2025-05-29)",     "soysauce/Y3506_V04_20250529_2548.dtbo"),

@@ -647,6 +647,23 @@ $('btn-ovl-custom-dtb')?.addEventListener('click', async () => {
   }
 });
 
+const openOnlineGenerator = async () => {
+  const url = 'https://arch-r.io/overlay-generator/';
+  try {
+    if (window.__TAURI__?.opener?.openUrl) {
+      await window.__TAURI__.opener.openUrl(url);
+    } else if (window.__TAURI__?.shell?.open) {
+      await window.__TAURI__.shell.open(url);
+    } else {
+      window.open(url, '_blank');
+    }
+  } catch (e) {
+    console.error('Could not open online generator URL:', e);
+  }
+};
+$('btn-online-generator')?.addEventListener('click', openOnlineGenerator);
+$('btn-ovl-online-generator')?.addEventListener('click', openOnlineGenerator);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -685,7 +702,7 @@ function translateError(msg) {
     [/device not found|was the sd card removed/i, 'error_device_removed'],
     [/not a removable/i, 'error_not_removable'],
     [/no.*image.*found/i, 'error_no_image'],
-    [/network|dns|connect|timeout/i, 'error_network'],
+    [/^offline:|network|dns|connect|timeout|reqwest::Error|tcp.*reset/i, 'error_network'],
     [/checksum.*fail|sha256 mismatch/i, 'error_checksum_failed'],
     [/verify_failed/i, 'error_verify_failed'],
     [/failed to run pkexec|osascript error|failed to run powershell/i, 'error_privilege'],

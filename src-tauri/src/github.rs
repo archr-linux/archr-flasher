@@ -45,8 +45,16 @@ struct GithubAsset {
 }
 
 pub async fn get_latest_release(variant: &str) -> Result<ReleaseInfo, String> {
+    // Tight timeouts: this is called from the startup auto-refresh and
+    // we must NOT block the UI when the host is offline. reqwest by
+    // default inherits the kernel TCP_USER_TIMEOUT which can be
+    // minutes long; explicitly cap connect to 3 s and total to 10 s
+    // so an unreachable github.com surfaces as "offline" within a few
+    // seconds and the user can still pick a local image.
     let client = reqwest::Client::builder()
         .user_agent("archr-flasher")
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
@@ -54,7 +62,7 @@ pub async fn get_latest_release(variant: &str) -> Result<ReleaseInfo, String> {
         .get(REPO_API)
         .send()
         .await
-        .map_err(|e| format!("GitHub API error: {}", e))?
+        .map_err(|e| format!("offline: {}", e))?
         .json()
         .await
         .map_err(|e| format!("JSON parse error: {}", e))?;
@@ -203,8 +211,12 @@ pub async fn download_image(
         }
     }
 
+    // Download path: tight connect_timeout so we fail fast if offline,
+    // but NO overall timeout because a legitimate ~1.5 GB download
+    // over a slow link can easily take 10+ minutes.
     let client = reqwest::Client::builder()
         .user_agent("archr-flasher")
+        .connect_timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| format!("HTTP error: {}", e))?;
 
@@ -212,7 +224,7 @@ pub async fn download_image(
         .get(&release.download_url)
         .send()
         .await
-        .map_err(|e| format!("Download error: {}", e))?;
+        .map_err(|e| format!("offline: {}", e))?;
 
     if !response.status().is_success() {
         return Err(format!("Download failed: HTTP {}", response.status()));

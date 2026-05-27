@@ -319,6 +319,28 @@ body {
   color: var(--text);
 }
 
+/* Subtle "link-style" variant of btn-outline: no border, smaller, sits
+   below the main custom-DTB button as a secondary path that points to
+   the online overlay generator. Lets the primary action keep its
+   visual weight while still discovering the web tool. */
+.btn-link-style {
+  border-color: transparent;
+  background: transparent;
+  font-size: 0.85em;
+  padding: 4px 8px;
+  margin-top: 4px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  color: var(--blue);
+  width: auto;
+}
+
+.btn-link-style:hover {
+  background: transparent;
+  text-decoration: none;
+  color: var(--text);
+}
+
 .btn-next {
   background: var(--blue);
   border-color: var(--blue);

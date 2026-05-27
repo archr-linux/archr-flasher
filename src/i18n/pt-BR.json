@@ -106,6 +106,7 @@
   "panel_disclaimer_ok": "OK, entendi",
   "panel_hint": "Escolha o painel que corresponde à tela do seu dispositivo.",
   "custom_dtb": "Gerar a partir de DTB personalizado...",
+  "online_generator": "Gerador de Overlays Online",
   "custom_dtb_hint": "Forneça seu próprio DTB do firmware original para gerar um overlay.",
   "custom_dtb_selected": "DTB personalizado: {file}",
   "custom_dtb_generating": "Gerando overlay a partir de {file}...",

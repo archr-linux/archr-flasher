@@ -424,9 +424,14 @@ fn apply_custom_overlay(
 }
 
 /// Check if a new version of the Flasher app is available.
+///
+/// Offline-safe: the updater builder runs with a tight timeout so a
+/// missing network surfaces in a few seconds. The frontend wraps this
+/// call in try/catch silently, so a failure here is fully invisible.
 #[tauri::command]
 async fn check_app_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let update = app.updater_builder()
+        .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| format!("{}", e))?
         .check()
@@ -443,6 +448,7 @@ async fn check_app_update(app: tauri::AppHandle) -> Result<Option<String>, Strin
 #[tauri::command]
 async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
     let update = app.updater_builder()
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("{}", e))?
         .check()
