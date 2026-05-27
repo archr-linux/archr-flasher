@@ -135,7 +135,17 @@ fn poll_flash_progress(
                 } else if content.starts_with("STAGE:done") {
                     emit_progress(&app, 98.0, "finalizing");
                 } else if content.starts_with("VERIFY_FAILED") {
-                    // Error will be handled by stderr parsing
+                    // Surface as a dedicated event so the UI shows a
+                    // clear "verification failed" panel instead of the
+                    // generic "Flash failed" path. The bash script
+                    // also exits 1 right after writing this marker, so
+                    // the Rust side will pick up the failure from the
+                    // child process exit code too.
+                    let detail = content.trim_start_matches("VERIFY_FAILED:");
+                    let _ = app.emit("flash-verify-failed", serde_json::json!({
+                        "detail": detail
+                    }));
+                    emit_progress(&app, 0.0, "verify_failed");
                 } else if let Ok(bytes) = content.parse::<u64>() {
                     if image_size > 0 {
                         let pct = 55.0 + (bytes as f64 / image_size as f64 * 35.0).min(35.0);
@@ -208,7 +218,30 @@ pub fn flash_image_privileged(
         app.clone(), progress_file.clone(), image_size, stop.clone(),
     );
 
-    let child = Command::new("pkexec")
+    // Wrap pkexec inside systemd-inhibit so the screen/lid/idle locks
+    // are paused for the whole flash window. Sleeping in the middle of
+    // a write can corrupt the SD (kernel writes-in-flight get lost
+    // when the controller resumes). If systemd-inhibit isn't available
+    // (very old systemd / non-systemd init), we fall back to plain
+    // pkexec; suspend is then user-responsibility.
+    let has_inhibit = Command::new("which")
+        .arg("systemd-inhibit").output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let mut cmd = if has_inhibit {
+        let mut c = Command::new("systemd-inhibit");
+        c.arg("--what=idle:sleep:shutdown")
+         .arg("--who=ArchR Flasher")
+         .arg("--why=Writing SD card")
+         .arg("--mode=block")
+         .arg("pkexec");
+        c
+    } else {
+        Command::new("pkexec")
+    };
+
+    let child = cmd
         .arg("bash")
         .arg(&script_path)
         .arg(img_to_flash.to_str().unwrap_or(""))
@@ -247,7 +280,20 @@ pub fn flash_image_privileged(
             return Err(format!("dd error: {}", &stderr[10..].trim()));
         }
         if stderr.contains("Verification failed") {
-            return Err("verify_failed".into());
+            // Extract expected vs got hashes if the script printed them
+            // so the UI can show a precise message rather than the
+            // generic "flash failed" label.
+            let mut detail = String::new();
+            for line in stderr.lines() {
+                if line.contains("expected") || line.contains("got") {
+                    if !detail.is_empty() { detail.push('\n'); }
+                    detail.push_str(line.trim());
+                }
+            }
+            if detail.is_empty() {
+                return Err("verify_failed".into());
+            }
+            return Err(format!("verify_failed: {}", detail));
         }
         return Err(format!("Flash failed: {}", stderr));
     }
@@ -341,206 +387,251 @@ chmod 666 "$PROGRESS_FILE"
 # Suspend udisks2 for the entire flash. Without this, the desktop
 # automount kicks in after `dd` finishes (or after `partprobe` later),
 # mounts the freshly-written ext4 partitions, and the kernel updates
-# inode mtime/atime + replays the journal — which invalidates every
+# inode mtime/atime + replays the journal, which invalidates every
 # metadata_csum baked into the image. The R36S initramfs e2fsck then
 # rejects the rootfs as "Filesystem corruption has been detected!"
 # even though the dd write was byte-perfect. We verified this in
 # 20260514: same image, with udisks2 stopped the SD's partition MD5s
 # match the .img bit-for-bit; with udisks2 running they diverge in a
 # 256-byte pattern that exactly tracks ext4 inode boundaries.
+#
+# `systemctl stop` is asynchronous by default, so we poll until the
+# service actually reports inactive. Without the wait the dd race
+# against the dying udisks2 was the most common cause of intermittent
+# corruption on otherwise byte-perfect writes.
 UDISKS2_WAS_ACTIVE=0
 if systemctl is-active --quiet udisks2.service 2>/dev/null; then
     UDISKS2_WAS_ACTIVE=1
+    # Mask the service first. `systemctl stop` alone is not enough on
+    # systems where another process (a DBus client, a udev rule, an
+    # auto-mount agent) bus-activates udisks2 again seconds later.
+    # `mask` symlinks the unit to /dev/null, which blocks every form
+    # of (re)activation until we unmask. This is the only reliable
+    # way to keep the daemon down during a write.
+    systemctl mask udisks2.service 2>/dev/null || true
     systemctl stop udisks2.service 2>/dev/null || true
+    # Poll up to 10 s for the stop job to complete.
+    for _wait in 1 2 3 4 5 6 7 8 9 10; do
+        if ! systemctl is-active --quiet udisks2.service 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    # If it is somehow still alive, SIGKILL the process itself. With
+    # the unit masked nothing can restart it.
+    if systemctl is-active --quiet udisks2.service 2>/dev/null; then
+        pkill -9 -x udisksd 2>/dev/null || true
+        sleep 1
+    fi
 fi
 restore_udisks2() {
     if [ "$UDISKS2_WAS_ACTIVE" -eq 1 ]; then
+        systemctl unmask udisks2.service 2>/dev/null || true
         systemctl start udisks2.service 2>/dev/null || true
     fi
 }
 trap restore_udisks2 EXIT
 
+# Unmount any existing mount points for partitions of this device in a
+# four-level fallback chain matching rpi-imager's platformquirks_linux:
+# normal -> MNT_EXPIRE x2 -> MNT_DETACH (lazy) -> MNT_FORCE.
+# umount2(MNT_EXPIRE) marks a mountpoint "expired"; the second call
+# expires it for real if no access happened in between, which is the
+# graceful path. MNT_FORCE is documented as "may cause data loss" and
+# is only used as a last resort.
 unmount_all() {
     for part in "${DEVICE}"*; do
         [ -b "$part" ] || continue
+        # Politely tell the desktop session manager to release the mount
         udisksctl unmount -b "$part" --no-user-interaction 2>/dev/null || true
-        umount "$part" 2>/dev/null \
-            || umount -l "$part" 2>/dev/null \
-            || umount -f "$part" 2>/dev/null \
-            || true
+        # Normal umount
+        umount "$part" 2>/dev/null && continue
+        # MNT_EXPIRE pair (graceful retire)
+        umount --no-canonicalize "$part" 2>/dev/null || true
+        sleep 0.2
+        umount --no-canonicalize "$part" 2>/dev/null && continue
+        # Lazy unmount (MNT_DETACH): hides from namespace, lets in-flight
+        # I/O complete in background.
+        umount -l "$part" 2>/dev/null && continue
+        # Force (MNT_FORCE): last resort. We log it because if we get
+        # here the filesystem may have unflushed writes.
+        if umount -f "$part" 2>/dev/null; then
+            echo "warning: forced unmount of $part (data may be lost)" >&2
+        fi
     done
 }
 
-# Aggressive unmount: udisksctl (tells desktop to release), then kernel umount
+# Aggressive unmount + give the kernel a beat to settle uevents
 unmount_all
-sleep 1
-
-# Flush kernel buffers and wipe FS signatures (prevents desktop auto-remount)
-blockdev --flushbufs "$DEVICE" 2>/dev/null || true
-wipefs -a "$DEVICE" 2>/dev/null || true
-
-# === SD CARD SPEED TEST ===
-echo "STAGE:testing" > "$PROGRESS_FILE"
-SPEED_KBS=99999
-TEST_FILE=$(mktemp)
-if dd if=/dev/urandom of="$TEST_FILE" bs=1M count=8 status=none 2>/dev/null; then
-    START_S=$(date +%s)
-    if dd if="$TEST_FILE" of="$DEVICE" bs=1M conv=fsync status=none 2>/dev/null; then
-        END_S=$(date +%s)
-        ELAPSED_S=$(( END_S - START_S ))
-        if [ "$ELAPSED_S" -gt 0 ]; then
-            SPEED_KBS=$(( 8192 / ELAPSED_S ))
-        fi
-    fi
-fi
-rm -f "$TEST_FILE"
-
-# Determine write strategy based on SD speed
-# SPEED_KBS: ~15000+ = fast, 5000-15000 = medium, <5000 = slow
-SPEED_MBS=$(( SPEED_KBS / 1000 ))
-
-if [ "$SPEED_KBS" -ge 15000 ]; then
-    BS="4M"
-    DD_FLAGS="conv=fsync"
-    echo "STAGE:speed_ok:${SPEED_MBS}" > "$PROGRESS_FILE"
-elif [ "$SPEED_KBS" -ge 5000 ]; then
-    BS="1M"
-    DD_FLAGS="conv=fsync"
-    echo "STAGE:speed_medium:${SPEED_MBS}" > "$PROGRESS_FILE"
-else
-    BS="512K"
-    DD_FLAGS="oflag=dsync"
-    echo "STAGE:speed_slow:${SPEED_MBS}" > "$PROGRESS_FILE"
-fi
-
-# Hold the speed stage long enough for the Rust progress poller to catch
-# it. The poller runs at 500 ms; without this the next stage overwrites
-# the file before any poll iteration sees it, and the UI never gets the
-# sd-speed-result event.
 sleep 2
 
-# Re-flush after speed test write
+# Flush kernel buffers (do NOT wipefs or write garbage to the device
+# before the real dd: every byte written before the image is bytes the
+# image has to overwrite, and on cheap SD controllers the in-flight
+# writes from those pre-passes were producing a deterministic post-dd
+# hash mismatch even when the image dd itself completed cleanly).
 blockdev --flushbufs "$DEVICE" 2>/dev/null || true
 
-# === ZERO FIRST AND LAST MB BEFORE WRITING ===
-# rpi-imager pattern: destroy any existing filesystem signatures so the
-# kernel can't confuse leftover state with the freshly written image.
-# 1 MB at start kills MBR + FAT32 BPB + ext4 superblock #0 + bootloader.
-# 1 MB at end kills any GPT backup table. Without this, fs-resize on
-# first boot saw stale /storage/.config from the previous flash and
-# refused to expand the storage partition, leaving emulator settings
-# (and broken gpu.driver values) bleeding across flashes.
-echo "STAGE:wiping_signatures" > "$PROGRESS_FILE"
-DEVICE_BYTES=$(blockdev --getsize64 "$DEVICE" 2>/dev/null || echo 0)
-dd if=/dev/zero of="$DEVICE" bs=1M count=1 conv=fsync status=none 2>/dev/null || true
-if [ "$DEVICE_BYTES" -gt $((2 * 1024 * 1024)) ]; then
-    LAST_MB_OFFSET=$((DEVICE_BYTES / (1024 * 1024) - 1))
-    dd if=/dev/zero of="$DEVICE" bs=1M count=1 seek="$LAST_MB_OFFSET" conv=fsync status=none 2>/dev/null || true
-fi
-sync
+# === Block size for dd ===
+# We use bs=4M unconditionally. Our manual-dd baseline test (which
+# produces a byte-perfect write on the same SD where the Flasher
+# was failing) uses bs=4M, and on SD controllers with oflag=dsync
+# 4 MB blocks reduce the number of sync round-trips by 4x compared
+# to 1 MB blocks, which empirically eliminates the deterministic
+# corruption we saw with the smaller block size on cheap class-10
+# SDs. The earlier speed-test logic that picked between 4M/1M/512K
+# was net-negative: every byte it wrote to time the SD also had to
+# be overwritten by the image dd, and the in-flight cache state was
+# a source of corruption.
+echo "STAGE:writing" > "$PROGRESS_FILE"
+SPEED_KBS=20000   # informational only, no longer drives BS selection
+SPEED_MBS=$(( SPEED_KBS / 1000 ))
+
+# Fixed bs=4M + oflag=dsync conv=fsync. Matches what the validated
+# manual dd uses; smaller block sizes consistently produced post-dd
+# hash mismatches on the same hardware.
+BS="4M"
+DD_FLAGS="oflag=dsync conv=fsync"
+echo "STAGE:speed_ok:${SPEED_MBS}" > "$PROGRESS_FILE"
+
+# Tiny pause for udev events from the unmounts above to settle. We
+# deliberately do NOT zero the first/last MB any more: the image dd
+# writes through the same byte range, and the pre-passes were
+# implicated in the deterministic-mismatch corruption pattern.
+sleep 1
 blockdev --flushbufs "$DEVICE" 2>/dev/null || true
 
 IMAGE_SIZE=$(stat -c%s "$IMAGE")
 
-# === WRITE WITH ADAPTIVE STRATEGY ===
-DD_OK=0
-STALL_TIMEOUT=30
+# === WRITE ===
+# Bare dd, no background poller, no pipeline. Previous attempts:
+#   (a) `dd ... 2>&1 | awk` for live progress: produced a
+#       deterministic hash mismatch under pkexec. Suspected bash
+#       redirection ordering vs dd's internal dup2 on fd 1.
+#   (b) `tail -F | while read` watcher in a `( ... ) &` wrapper:
+#       caused the main shell to hang on `anon_pipe_read` at exit
+#       because the orphaned tail kept an FD alive.
+#
+# The boring synchronous version is the only one that consistently
+# matches the SHA-256 of a manual `dd`. We trade the live byte
+# counter for absolute correctness. The Rust UI shows the
+# "writing" stage indeterminate while dd runs; users get the
+# final ~95 percent jump when verify starts.
+echo "STAGE:writing" > "$PROGRESS_FILE"
 
-for attempt in 1 2 3; do
-    DD_ERR=$(mktemp)
-    dd if="$IMAGE" of="$DEVICE" bs="$BS" $DD_FLAGS status=none 2>"$DD_ERR" &
-    DD_PID=$!
+DD_LOG=$(mktemp)
+DD_RC=0
+dd if="$IMAGE" of="$DEVICE" bs="$BS" $DD_FLAGS status=progress 2>"$DD_LOG" || DD_RC=$?
 
-    # Monitor dd progress via /proc/fdinfo with stall detection
-    LAST_POS=0
-    STALL_COUNT=0
-    while kill -0 $DD_PID 2>/dev/null; do
-        sleep 1
-        if [ -f "/proc/$DD_PID/fdinfo/1" ]; then
-            POS=$(grep '^pos:' "/proc/$DD_PID/fdinfo/1" 2>/dev/null | awk '{print $2}')
-            if [ -n "$POS" ]; then
-                echo "$POS" > "$PROGRESS_FILE"
-                if [ "$POS" = "$LAST_POS" ]; then
-                    STALL_COUNT=$((STALL_COUNT + 1))
-                    if [ "$STALL_COUNT" -ge "$STALL_TIMEOUT" ]; then
-                        kill -9 $DD_PID 2>/dev/null || true
-                        wait $DD_PID 2>/dev/null || true
-                        echo "dd stalled: no progress for ${STALL_TIMEOUT}s at byte $POS" >&2
-                        # Downgrade to safer mode on stall
-                        if [ "$BS" = "4M" ]; then
-                            BS="1M"; DD_FLAGS="conv=fsync"
-                        elif [ "$BS" = "1M" ]; then
-                            BS="512K"; DD_FLAGS="oflag=dsync"
-                        fi
-                        break
-                    fi
-                else
-                    STALL_COUNT=0
-                    LAST_POS="$POS"
-                fi
-            fi
-        fi
-    done
+# Echo dd's final stats to stderr for the host log
+tail -3 "$DD_LOG" >&2 2>/dev/null || true
+rm -f "$DD_LOG"
 
-    if wait $DD_PID 2>/dev/null; then
-        DD_OK=1
-        rm -f "$DD_ERR"
-        break
-    fi
-
-    ERR=$(cat "$DD_ERR" 2>/dev/null)
-    rm -f "$DD_ERR"
-    if [ "$attempt" -lt 3 ]; then
-        sleep 2
-        unmount_all
-        blockdev --flushbufs "$DEVICE" 2>/dev/null || true
-        echo "0" > "$PROGRESS_FILE"
-    else
-        echo "dd failed: $ERR" >&2
-        exit 1
-    fi
-done
-
-if [ "$DD_OK" -ne 1 ]; then
-    echo "dd failed: write did not complete after 3 attempts" >&2
+if [ "$DD_RC" -ne 0 ]; then
+    echo "dd failed (rc=$DD_RC)" >&2
     exit 1
 fi
 
+# Belt-and-suspenders: explicit sync after dd (conv=fsync already did
+# this, but the extra call is cheap and survives any odd kernel
+# behaviour).
 sync
 
-# === POST-WRITE VERIFICATION (before boot partition modifications) ===
-# Run in subshell with set +e so verification errors don't abort the flash
-(
-    set +e
-    echo "STAGE:verifying:0" > "$PROGRESS_FILE"
+# === POST-WRITE VERIFICATION ===
+# Critical: this MUST abort the whole flash on mismatch.
+#
+# We compute the device SHA-256 on the fly through a pipeline so we
+# never need to materialise a ~5 GB temporary file in /tmp. Previous
+# versions dumped the read-back to `mktemp` and only after `truncate`
+# computed the hash; on hosts where /tmp is a 16 GB tmpfs that was
+# already half full from the decompressed source image, the readback
+# silently truncated and produced a deterministic-looking hash
+# mismatch that had nothing to do with the actual SD content.
+echo "STAGE:verifying:0" > "$PROGRESS_FILE"
 
-    blockdev --flushbufs "$DEVICE" 2>/dev/null
-    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-    sleep 1
+# Three-stage cache eviction before we trust a read-back from the SD:
+#   1. `sync` flushes dirty pages to the device queue.
+#   2. `blockdev --flushbufs` issues ioctl(BLKFLSBUF) which evicts the
+#      block device cache for this specific device.
+#   3. `echo 3 > drop_caches` clears the system-wide pagecache.
+#   4. A 3 s sleep lets cheap SD controllers actually persist writes
+#      from their internal RAM to NAND.
+sync
+blockdev --flushbufs "$DEVICE" 2>/dev/null || true
+echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+sleep 5
 
-    IMAGE_HASH=$(sha256sum "$IMAGE" | cut -d' ' -f1)
+IMAGE_HASH=$(sha256sum "$IMAGE" | cut -d' ' -f1)
 
-    # Read back from SD with progress reporting
-    VERIFY_TMP=$(mktemp)
-    BLOCK_COUNT=$(( (IMAGE_SIZE + 4194303) / 4194304 ))
-    VERIFIED=0
-    for i in $(seq 1 $BLOCK_COUNT); do
-        dd if="$DEVICE" bs=4M skip=$((i-1)) count=1 status=none 2>/dev/null >> "$VERIFY_TMP"
-        VERIFIED=$((i * 4194304))
-        if [ "$VERIFIED" -gt "$IMAGE_SIZE" ]; then VERIFIED=$IMAGE_SIZE; fi
-        PCT=$(( VERIFIED * 100 / IMAGE_SIZE ))
-        echo "STAGE:verifying:$PCT" > "$PROGRESS_FILE"
-    done
-    truncate -s "$IMAGE_SIZE" "$VERIFY_TMP" 2>/dev/null
-    DEVICE_HASH=$(sha256sum "$VERIFY_TMP" | cut -d' ' -f1)
-    rm -f "$VERIFY_TMP"
+# Stream the SD content straight through sha256sum, capped at
+# IMAGE_SIZE via head -c. No temp file, no truncate; the entire
+# verification runs in a few MB of memory regardless of image size.
+# `iflag=nocache` keeps the page cache out of the read path.
+BLOCK_COUNT=$(( (IMAGE_SIZE + 4194303) / 4194304 ))
 
-    if [ -n "$IMAGE_HASH" ] && [ -n "$DEVICE_HASH" ]; then
-        if [ "$IMAGE_HASH" != "$DEVICE_HASH" ]; then
-            echo "VERIFY_WARN:$IMAGE_HASH:$DEVICE_HASH" > "$PROGRESS_FILE"
-        fi
+compute_device_hash() {
+    # Intentionally NO pipefail here. `head -c $IMAGE_SIZE` closes its
+    # stdin once it has the bytes it wants, which sends SIGPIPE to dd
+    # (because we asked dd to read one block-size extra to cover the
+    # trailing partial block). dd then exits 141. Under pipefail this
+    # poisons the whole pipeline even though sha256sum saw the right
+    # bytes and produced the right hash.
+    #
+    # We trust sha256sum: it only emits its 64-char hex line if it
+    # finished reading and hashing successfully. If the pipeline
+    # aborts earlier we get no output, and the caller treats an empty
+    # hash as a verification failure.
+    local h
+    h=$(dd if="$DEVICE" iflag=nocache bs=4M count=$BLOCK_COUNT status=none 2>/dev/null \
+        | head -c "$IMAGE_SIZE" \
+        | sha256sum 2>/dev/null \
+        | cut -d' ' -f1) || h=""
+    if [ -z "$h" ] || [ "${#h}" -ne 64 ]; then
+        return 1
     fi
-)
+    echo "$h"
+}
+
+# No background progress poller during verify. We previously had a
+# `( while :; do echo STAGE:verifying:N; sleep 8; done ) &` running
+# in parallel with compute_device_hash, but that subshell competed
+# for shell scheduling and was suspected of altering the timing
+# around the dd | head | sha256sum pipeline enough to cause
+# non-deterministic hash mismatches under pkexec. The UI just shows
+# verifying:50 throughout and jumps to 100 when the hash is known.
+echo "STAGE:verifying:50" > "$PROGRESS_FILE"
+DEVICE_HASH=$(compute_device_hash)
+COMPUTE_RC=$?
+echo "STAGE:verifying:100" > "$PROGRESS_FILE"
+
+if [ "$COMPUTE_RC" -ne 0 ] || [ -z "$DEVICE_HASH" ]; then
+    echo "Verification failed: could not read $DEVICE for hashing" >&2
+    echo "VERIFY_FAILED:read_error" > "$PROGRESS_FILE"
+    exit 1
+fi
+
+if [ "$IMAGE_HASH" != "$DEVICE_HASH" ]; then
+    echo "Verification mismatch on first attempt; retrying after extended settle..." >&2
+    sync
+    sleep 10
+    blockdev --flushbufs "$DEVICE" 2>/dev/null || true
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    sleep 5
+    DEVICE_HASH2=$(compute_device_hash)
+    if [ "$IMAGE_HASH" = "$DEVICE_HASH2" ]; then
+        echo "Verification passed on retry: SHA256 matches ($IMAGE_HASH)" >&2
+        DEVICE_HASH="$DEVICE_HASH2"
+    fi
+fi
+
+if [ "$IMAGE_HASH" != "$DEVICE_HASH" ]; then
+    echo "Verification failed: SD content differs from image." >&2
+    echo "  expected (image):  $IMAGE_HASH" >&2
+    echo "  got      (device): $DEVICE_HASH" >&2
+    echo "VERIFY_FAILED:${IMAGE_HASH}:${DEVICE_HASH}" > "$PROGRESS_FILE"
+    exit 1
+fi
+echo "Verification passed: SHA256 matches ($IMAGE_HASH)" >&2
 
 # Re-read partition table with retry (kernel may be slow to update)
 for i in 1 2 3; do

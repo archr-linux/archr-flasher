@@ -596,6 +596,20 @@ def make_dtbo(dtb_data, args):
     # hardware. Trusting that string skipped the GPIO overrides on clones and
     # produced the "backlight on, no image" black screen on those boards.
     if 'SDORIG' in args['flags'] and 'odroidgo3' in compat:
+        # Short-circuit path: kernel base DTB already has the correct
+        # GPIO/panel wiring, no overlay edits needed beyond what we
+        # already produced. BUT: if the user passed NAm (no external
+        # amplifier), we still have to switch the active sound card
+        # from `rk817-sound` (amp routing) to `rk817-sound-spko-direct`,
+        # otherwise mainline ASoC keeps the speaker muted (Y3506
+        # Soysauce V03/V04/V05 fall here).
+        if 'NAm' in args['flags']:
+            hpdet_ovl = add_overlay(overlay, '/')
+            spko_path = hpdet_ovl.path + '/__overlay__/rk817-sound-spko-direct'
+            default_path = hpdet_ovl.path + '/__overlay__/rk817-sound'
+            overlay.set_property('status', 'okay', path=spko_path)
+            overlay.set_property('status', 'disabled', path=default_path)
+            args['logger'].info("audio: spko-direct variant via short-circuit (odroidgo3 + NAm)")
         return overlay.to_dtb()
 
     # copy reset config
@@ -704,15 +718,37 @@ def make_dtbo(dtb_data, args):
     try:
         snd = dt.get_node('/rk817-sound')
 
-        # fetch raw   hp-det-gpio = <0x6f 0x16 0x00>;
-        hpdet = snd.get_property('hp-det-gpio').data
-        hp_det = dt.get_node('/pinctrl/headphone/hp-det')
-        hp_det_pins = hp_det.get_property('rockchip,pins')
-        hp_det_pull_node = node_by_phandle(dt, hp_det_pins[3])
+        # Vendor BSP DTBs use one of two names for the headphone
+        # detection GPIO. Legacy Rockchip BSP 4.4 boards write
+        # `hp-det-gpio`. Newer batches (including most Soysauce
+        # variants generated from mainline-style DT) use the
+        # canonical `simple-audio-card,hp-det-gpio`. Without
+        # accepting both we silently skipped the audio block on V05.
+        hpdet_prop = snd.get_property('hp-det-gpio')
+        if hpdet_prop is None:
+            hpdet_prop = snd.get_property('simple-audio-card,hp-det-gpio')
+        if hpdet_prop is None:
+            raise RuntimeError("no hp-det-gpio property on /rk817-sound")
+        hpdet = list(hpdet_prop.data)
+        # Some vendor DTBs omit /pinctrl/headphone/hp-det entirely
+        # because the kernel auto-binds via the codec phandle. We
+        # tolerate that: if the pinctrl node is missing we skip the
+        # bias-pull fixup; the codec still picks up the headphone
+        # detection gpio from simple-audio-card,hp-det-gpio.
+        try:
+            hp_det = dt.get_node('/pinctrl/headphone/hp-det')
+            hp_det_pins = list(hp_det.get_property('rockchip,pins').data)
+            hp_det_pull_node = node_by_phandle(dt, hp_det_pins[3])
+        except Exception:
+            hp_det = None
+            hp_det_pins = None
+            hp_det_pull_node = None
         # resolve <0x6f> into '/pinctrl/gpio2@ff260000'
         hpdet_gpio_path = resolve_phandle(dt, hpdet[0])
         # find symbol 'gpio2' for path '/pinctrl/gpio2@ff260000'
         gpiosyms = [p.name for p in symbols.props if p.value == hpdet_gpio_path]
+        if not gpiosyms:
+            raise RuntimeError(f"hp-det gpio controller phandle {hpdet[0]} not in __symbols__")
         gpio_sym = gpiosyms[0]
 
         # on success, add overlay
@@ -735,12 +771,42 @@ def make_dtbo(dtb_data, args):
                 if snd_codec.exist_property('spk-ctl-gpios'):
                     amp_gpio = snd_codec.get_property('spk-ctl-gpios').data
 
-        # Determine preset, configure amplifier if needed
-        if amp_gpio:
+        # ---------------------------------------------------------------
+        # Pick one of three sound card variants exposed by the base DTS
+        # (defined in rk3326-gameconsole-r36s.dts):
+        #
+        # 1. `rk817-sound-amplified`: external speaker amp gated by a
+        #    discrete enable GPIO (R36S original, K36, most clones).
+        #    Selected when vendor DTB declares `spk-con-gpio` (or its
+        #    codec-side equivalent `spk-ctl-gpios`).
+        # 2. `rk817-sound-simple`: external amp on a regulator without
+        #    a GPIO gate. Selected via the SRs flag, since vendor DTBs
+        #    cannot disambiguate this from "no amp at all".
+        # 3. `rk817-sound-spko-direct`: speaker driven straight from
+        #    the rk817 SPKO output, with no external amp. Selected via
+        #    the NAm (No Amplifier) flag. This is what Y3506 Soysauce
+        #    V03/V04/V05 actually need. Vendor BSP kernel 4.4 hid this
+        #    gap because `rk817_codec.c` carried hardcoded DAPM
+        #    widgets; mainline ASoC respects the DT strictly, so
+        #    without this variant the speaker stays muted no matter
+        #    what the vendor card declares.
+        #
+        # Vendor DTBs cannot be reliably auto-classified because the
+        # R36S original BSP and the Y3506 BSP both publish identical
+        # rk817-sound nodes (just Mic + Headphone, no Speaker widget,
+        # no `spk-con-gpio`). The amp presence is a hardware fact, so
+        # generator.sh tags soysauce boards with NAm and original /
+        # clone boards default to amplified.
+        force_no_amp = ('NAm' in args['flags'])
+
+        if force_no_amp:
+            rk817_path = hpdet_ovl.path+'/__overlay__/rk817-sound-spko-direct'
+            args['logger'].info("audio: spko-direct variant (NAm flag: no external amp, SPKO direct to speaker)")
+        elif amp_gpio:
             rk817_path = hpdet_ovl.path+'/__overlay__/rk817-sound-amplified'
             amp_gpio_sym = [p.name for p in symbols.props if p.value == resolve_phandle(dt, amp_gpio[0])][0]
             gpio_num = int(amp_gpio_sym[4:])
-            args['logger'].info(f"spk-con-gpio {amp_gpio_sym} {amp_gpio[1]} on {hpdet_ovl.path}")
+            args['logger'].info(f"audio: amplified variant (spk-con-gpio {amp_gpio_sym} {amp_gpio[1]})")
 
             amp_path = hpdet_ovl.path+'/__overlay__/audio-amplifier'
             overlay.set_property('enable-gpios', [0xffffffff, amp_gpio[1], amp_gpio[2]], path=amp_path)
@@ -749,29 +815,69 @@ def make_dtbo(dtb_data, args):
             amp_pc_path = hpdet_ovl.path+'/__overlay__/pinctrl/speaker/spk-amp-enable-h'
             overlay.set_property('rockchip,pins', [gpio_num, amp_gpio[1], 0, 0xffffffff], path=amp_pc_path)
             add_fixup(overlay, 'pcfg_pull_none', amp_pc_path+':rockchip,pins:12')
-        else:
+        elif force_simple_audio_routing:
             rk817_path = hpdet_ovl.path+'/__overlay__/rk817-sound-simple'
-
-        overlay.set_property('status', 'okay', path=rk817_path)
-        # for some reason hp detection polarity needs to be inverted on some devices
-        if 'HPi' in args['flags']:
-            if hpdet[2] == 0:
-                hpdet[2] = 1
-            else:
-                hpdet[2] = 0
-        overlay.set_property('simple-audio-card,hp-det-gpio', [0xffffffff, hpdet[1], hpdet[2]], path=rk817_path)
-        add_fixup(overlay, gpio_sym, rk817_path+':simple-audio-card,hp-det-gpio:0')
-        pins_path = hpdet_ovl.path+'/__overlay__/pinctrl/headphone/hp-det'
-        overlay.set_property('rockchip,pins', hp_det_pins[0:3] + [0xffffffff], path=pins_path)
-        # Restore bias reference
-        if hp_det_pull_node.exist_property('bias-pull-down'):
-            add_fixup(overlay, 'pcfg_pull_down', pins_path+':rockchip,pins:12')
+            args['logger'].info("audio: simple variant (SRs flag: external amp on regulator)")
         else:
-            add_fixup(overlay, 'pcfg_pull_up', pins_path+':rockchip,pins:12')
-        args['logger'].info(f"hp-det-gpio {gpiosyms[0]} on {hpdet_ovl.path}")
+            # No amp GPIO detected, no SRs flag, no NAm flag. Keep the
+            # default rk817-sound (amp routing) active. This preserves
+            # R36S original/clone behaviour that worked under RC-3.
+            rk817_path = None
+            args['logger'].info("audio: keeping default rk817-sound (amp routing from base DTS)")
+
+        # If we picked an explicit variant (amplified/simple/spko-direct),
+        # enable it AND disable the default rk817-sound so the kernel
+        # never sees two simple-audio-card instances competing for the
+        # rk817 codec / i2s pair. If rk817_path is None we keep the
+        # base DTS sound card as-is.
+        if rk817_path is not None:
+            overlay.set_property('status', 'okay', path=rk817_path)
+            default_path = hpdet_ovl.path + '/__overlay__/rk817-sound'
+            overlay.set_property('status', 'disabled', path=default_path)
+
+            # Headphone-detect polarity needs to be inverted on a
+            # handful of boards (HPi flag).
+            if 'HPi' in args['flags']:
+                hpdet[2] = 0 if hpdet[2] != 0 else 1
+            overlay.set_property('simple-audio-card,hp-det-gpio',
+                                 [0xffffffff, hpdet[1], hpdet[2]],
+                                 path=rk817_path)
+            add_fixup(overlay, gpio_sym, rk817_path+':simple-audio-card,hp-det-gpio:0')
+
+            # Pinctrl override only when the vendor DTB actually defines
+            # /pinctrl/headphone/hp-det. Boards without that node use
+            # the base DTS pinctrl unchanged.
+            if hp_det_pins is not None and hp_det_pull_node is not None:
+                pins_path = hpdet_ovl.path+'/__overlay__/pinctrl/headphone/hp-det'
+                overlay.set_property('rockchip,pins', hp_det_pins[0:3] + [0xffffffff], path=pins_path)
+                if hp_det_pull_node.exist_property('bias-pull-down'):
+                    add_fixup(overlay, 'pcfg_pull_down', pins_path+':rockchip,pins:12')
+                else:
+                    add_fixup(overlay, 'pcfg_pull_up', pins_path+':rockchip,pins:12')
+
+            args['logger'].info(f"hp-det-gpio {gpio_sym} on {hpdet_ovl.path}")
 
     except Exception as e:
-        args['logger'].info(e)
+        import traceback
+        args['logger'].info(f"audio block: {e}\n{traceback.format_exc()}")
+
+        # Fallback for boards where the vendor DTB lacks `hp-det-gpio`
+        # entirely (six Y3506 Soysauce V03/V04 batches). With NAm we
+        # still need to switch the active sound card to spko-direct,
+        # even though we can't propagate the headphone-detect pin from
+        # the vendor. The base DTS variant carries a sensible default
+        # hp-det-gpio so headphone detection still works on the panel
+        # the kernel actually ships for these boards.
+        if 'NAm' in args['flags']:
+            try:
+                hpdet_ovl_fb = add_overlay(overlay, '/')
+                spko_path = hpdet_ovl_fb.path + '/__overlay__/rk817-sound-spko-direct'
+                default_path = hpdet_ovl_fb.path + '/__overlay__/rk817-sound'
+                overlay.set_property('status', 'okay', path=spko_path)
+                overlay.set_property('status', 'disabled', path=default_path)
+                args['logger'].info("audio: spko-direct variant via fallback (NAm flag, no hp-det in vendor)")
+            except Exception as e2:
+                args['logger'].info(f"audio fallback also failed: {e2}")
 
     # Tier 3: walk any remaining vendor properties we haven't already
     # handled and propagate them. Catches board-specific quirks (custom
