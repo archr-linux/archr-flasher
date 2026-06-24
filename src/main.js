@@ -427,11 +427,37 @@ async function startFlash() {
   setBusy(false);
 }
 
+// Format bytes as MB or GB with 1 decimal. We intentionally use 1024
+// (MiB/GiB) here because that's what dd writes and what users expect
+// to see lining up with the SD card capacity printed on the box.
+function formatBytes(n) {
+  if (n == null || isNaN(n)) return '';
+  const KB = 1024, MB = KB * 1024, GB = MB * 1024;
+  if (n >= GB) return (n / GB).toFixed(2) + ' GB';
+  if (n >= MB) return (n / MB).toFixed(0) + ' MB';
+  if (n >= KB) return (n / KB).toFixed(0) + ' KB';
+  return n + ' B';
+}
+
 window.__TAURI__?.event?.listen('flash-progress', (event) => {
-  const { percent, stage } = event.payload;
+  const { percent, stage, bytes_done, bytes_total } = event.payload;
   $('progress-fill').style.width = percent.toFixed(1) + '%';
   $('progress-percent').textContent = percent.toFixed(0) + '%';
-  $('progress-stage').textContent = t(stage) || stage;
+  // Right of the bar: live MB / MB whenever the backend has a byte
+  // counter (i.e. during writing and verifying). Falls back to the
+  // stage label otherwise (decompressing, finalizing, etc.).
+  if (bytes_total && bytes_total > 0) {
+    $('progress-stage').textContent =
+      formatBytes(bytes_done) + ' / ' + formatBytes(bytes_total);
+  } else {
+    $('progress-stage').textContent = t(stage) || stage;
+  }
+  // Below the bar: the human-readable phase ("Descompactando imagem...",
+  // "Gravando imagem...", "Verificando integridade...", etc.) so the
+  // user can see which phase the flasher is in even when the number
+  // counter is the dominant element next to the bar.
+  const phaseLabel = t(stage) || stage;
+  if (phaseLabel) setFlashStatus(phaseLabel, '');
 });
 
 window.__TAURI__?.event?.listen('sd-speed-result', (event) => {

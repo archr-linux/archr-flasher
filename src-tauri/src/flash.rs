@@ -12,12 +12,30 @@ use serde::Serialize;
 struct FlashProgress {
     percent: f64,
     stage: String,
+    /// Bytes already written/processed in the current stage. Zero when
+    /// the byte counter is not available (e.g. while decompressing).
+    bytes_done: u64,
+    /// Total bytes for the current stage (image size during writing
+    /// and verifying). Zero when unknown.
+    bytes_total: u64,
 }
 
 fn emit_progress(app: &AppHandle, percent: f64, stage: &str) {
+    emit_progress_bytes(app, percent, stage, 0, 0);
+}
+
+fn emit_progress_bytes(
+    app: &AppHandle,
+    percent: f64,
+    stage: &str,
+    bytes_done: u64,
+    bytes_total: u64,
+) {
     let _ = app.emit("flash-progress", FlashProgress {
         percent,
         stage: stage.to_string(),
+        bytes_done,
+        bytes_total,
     });
 }
 
@@ -149,7 +167,7 @@ fn poll_flash_progress(
                 } else if let Ok(bytes) = content.parse::<u64>() {
                     if image_size > 0 {
                         let pct = 55.0 + (bytes as f64 / image_size as f64 * 35.0).min(35.0);
-                        emit_progress(&app, pct, "writing");
+                        emit_progress_bytes(&app, pct, "writing", bytes, image_size);
                     }
                 }
             }
