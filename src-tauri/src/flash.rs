@@ -260,10 +260,13 @@ pub fn flash_image_privileged(
     stop.store(true, Ordering::Relaxed);
     let _ = poll_handle.join();
 
-    // Cleanup temp files
+    // Cleanup temp files. The decompressed .img is removed regardless
+    // of the source format. Previously only is_xz triggered the cleanup
+    // and gz-derived .img files stayed at /tmp/archr-flash-temp.img
+    // (5 GB) until reboot. needs_decompress covers both branches.
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(&progress_file);
-    if is_xz {
+    if needs_decompress {
         let _ = fs::remove_file(&img_to_flash);
     }
 
@@ -274,10 +277,19 @@ pub fn flash_image_privileged(
         if stderr.contains("dismissed") || stderr.contains("Not authorized") {
             return Err("cancelled".into());
         }
-        // Pass errors through so frontend shows the real cause
+        // Pass errors through so frontend shows the real cause.
+        // The bash preamble dumps diagnostic lines before any failure
+        // marker, so we search line-by-line rather than expecting
+        // a clean prefix on the whole stderr buffer.
         let stderr = stderr.trim();
-        if stderr.starts_with("dd failed:") {
-            return Err(format!("dd error: {}", &stderr[10..].trim()));
+        for line in stderr.lines() {
+            let l = line.trim();
+            if let Some(rest) = l.strip_prefix("dd failed:") {
+                return Err(format!("dd error: {}", rest.trim()));
+            }
+            if let Some(rest) = l.strip_prefix("Script error at line") {
+                return Err(format!("dd error: script aborted at line{}", rest));
+            }
         }
         if stderr.contains("Verification failed") {
             // Extract expected vs got hashes if the script printed them
@@ -295,7 +307,14 @@ pub fn flash_image_privileged(
             }
             return Err(format!("verify_failed: {}", detail));
         }
-        return Err(format!("Flash failed: {}", stderr));
+        // Last-resort: include the last 4 stderr lines in the message
+        // so the UI shows something actionable instead of an opaque
+        // "flash failed" path. The catch-all translation in main.js
+        // maps "flash failed" to the generic "write-protected?" copy,
+        // which is misleading when the real cause is e.g. "no space".
+        let tail: Vec<&str> = stderr.lines().rev().take(4).collect();
+        let tail_str = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
+        return Err(format!("Flash failed: {}", tail_str));
     }
 
     emit_progress(app, 95.0, "syncing");
@@ -377,6 +396,26 @@ DEVICE="$2"
 CUSTOM_DTBO="$3"
 VARIANT="$4"
 PROGRESS_FILE="$5"
+
+# Up-front diagnostics. When the script aborts later for any reason,
+# this preamble lets the maintainer correlate "what was the input?"
+# without depending on the UI capturing the full stderr stream.
+echo "=== flash.sh start $(date -u +%FT%TZ) ===" >&2
+echo "  IMAGE   = $IMAGE" >&2
+echo "  DEVICE  = $DEVICE" >&2
+echo "  VARIANT = $VARIANT" >&2
+echo "  CUSTOM_DTBO = $CUSTOM_DTBO" >&2
+
+if [ ! -f "$IMAGE" ]; then
+    echo "dd failed: source image missing at $IMAGE" >&2
+    exit 1
+fi
+if [ ! -b "$DEVICE" ]; then
+    echo "dd failed: target $DEVICE is not a block device" >&2
+    exit 1
+fi
+echo "  IMAGE size = $(stat -c%s "$IMAGE") bytes" >&2
+echo "  DEVICE size = $(blockdev --getsize64 "$DEVICE" 2>/dev/null || echo unknown) bytes" >&2
 
 # Recreate progress file as root (fs.protected_regular=2 on Ubuntu blocks
 # root from writing to user-owned files in /tmp via O_CREAT)
@@ -523,12 +562,19 @@ DD_LOG=$(mktemp)
 DD_RC=0
 dd if="$IMAGE" of="$DEVICE" bs="$BS" $DD_FLAGS status=progress 2>"$DD_LOG" || DD_RC=$?
 
-# Echo dd's final stats to stderr for the host log
-tail -3 "$DD_LOG" >&2 2>/dev/null || true
+# Echo dd's final stats to stderr for the host log; the last few lines
+# carry the byte-count summary AND any error message ("No space left
+# on device", "Input/output error", "Permission denied", etc.).
+echo "=== dd output (tail) ===" >&2
+tail -8 "$DD_LOG" >&2 2>/dev/null || true
+echo "=== end dd output ===" >&2
 rm -f "$DD_LOG"
 
 if [ "$DD_RC" -ne 0 ]; then
-    echo "dd failed (rc=$DD_RC)" >&2
+    # The leading "dd failed:" prefix matters: the Rust side parses
+    # for it explicitly to surface the real cause in the UI instead of
+    # the generic "write-protected" catch-all message.
+    echo "dd failed: rc=$DD_RC after writing to $DEVICE" >&2
     exit 1
 fi
 
@@ -984,10 +1030,13 @@ pub fn flash_image_privileged(
     stop.store(true, Ordering::Relaxed);
     let _ = poll_handle.join();
 
-    // Cleanup temp files
+    // Cleanup temp files. The decompressed .img is removed regardless
+    // of the source format. Previously only is_xz triggered the cleanup
+    // and gz-derived .img files stayed at /tmp/archr-flash-temp.img
+    // (5 GB) until reboot. needs_decompress covers both branches.
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(&progress_file);
-    if is_xz {
+    if needs_decompress {
         let _ = fs::remove_file(&img_to_flash);
     }
 
