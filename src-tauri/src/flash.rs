@@ -560,7 +560,43 @@ echo "STAGE:writing" > "$PROGRESS_FILE"
 
 DD_LOG=$(mktemp)
 DD_RC=0
-dd if="$IMAGE" of="$DEVICE" bs="$BS" $DD_FLAGS status=progress 2>"$DD_LOG" || DD_RC=$?
+
+# Launch dd as a background job so we can run an independent progress
+# poller in parallel. Earlier attempts at live progress went through
+# a `dd ... | awk` pipeline and produced deterministic hash mismatches
+# under pkexec; THAT was the redirection-ordering trap, not progress
+# reading per se. Reading /proc/$PID/io while dd runs is purely
+# passive — it never touches dd's fd or its data path, so it cannot
+# corrupt the write.
+dd if="$IMAGE" of="$DEVICE" bs="$BS" $DD_FLAGS 2>"$DD_LOG" &
+DD_PID=$!
+
+# Background poller: read /proc/$PID/io every 2 s, parse the
+# `write_bytes:` line and post that number to PROGRESS_FILE. The Rust
+# polling thread already maps a bare integer in PROGRESS_FILE to a
+# 55..90% writing-stage bar (see flash.rs poll_flash_progress), so we
+# get a real progress meter instead of the 56% freeze. The loop self-
+# terminates as soon as dd is gone (kill -0 on a dead pid fails).
+(
+    while kill -0 "$DD_PID" 2>/dev/null; do
+        if [ -r "/proc/$DD_PID/io" ]; then
+            wb=$(awk '/^write_bytes:/ {print $2; exit}' \
+                "/proc/$DD_PID/io" 2>/dev/null)
+            if [ -n "$wb" ] && [ "$wb" != "0" ]; then
+                echo "$wb" > "$PROGRESS_FILE" 2>/dev/null
+            fi
+        fi
+        sleep 2
+    done
+) &
+POLLER_PID=$!
+
+# Wait for dd to finish. `wait` with a PID returns dd's exit code.
+wait "$DD_PID" || DD_RC=$?
+
+# Tear down the poller cleanly. It may have already exited on its own.
+kill "$POLLER_PID" 2>/dev/null || true
+wait "$POLLER_PID" 2>/dev/null || true
 
 # Echo dd's final stats to stderr for the host log; the last few lines
 # carry the byte-count summary AND any error message ("No space left
