@@ -465,7 +465,82 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn elevate_if_needed() {
+    use std::os::unix::process::CommandExt;
+
+    // Already root? Nothing to do.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        return;
+    }
+
+    // Re-entrant guard: when pkexec succeeds it re-launches us with
+    // this env var set, so the second pass skips elevation.
+    if std::env::var("ARCHR_FLASHER_ELEVATED").is_ok() {
+        return;
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Cannot resolve current exe: {}", e);
+            return;
+        }
+    };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Preserve the bits the GUI needs across the pkexec boundary.
+    // pkexec strips most env by default (see /etc/pkexec.conf and the
+    // pkexec(1) man page), so we pass them through with `env VAR=...`.
+    let mut envs: Vec<String> = Vec::new();
+    for k in [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_TYPE",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "HOME",
+        "USER",
+        "LANG",
+        "LC_ALL",
+        "QT_QPA_PLATFORM",
+        "GDK_BACKEND",
+        "APPIMAGE",
+        "LD_PRELOAD",
+        "ARCHR_FLASHER_REEXEC",
+    ] {
+        if let Ok(v) = std::env::var(k) {
+            envs.push(format!("{}={}", k, v));
+        }
+    }
+    envs.push(format!("ARCHR_FLASHER_ELEVATED=1"));
+    envs.push(format!("ARCHR_FLASHER_ORIG_UID={}", euid));
+    envs.push(format!("ARCHR_FLASHER_ORIG_HOME={}",
+        std::env::var("HOME").unwrap_or_default()));
+
+    let mut cmd = std::process::Command::new("pkexec");
+    cmd.arg("env");
+    for e in &envs { cmd.arg(e); }
+    cmd.arg(exe);
+    for a in &args { cmd.arg(a); }
+
+    let err = cmd.exec();
+    eprintln!("Failed to elevate via pkexec: {}", err);
+    // If pkexec is unavailable, fall through to the un-elevated path so
+    // the legacy per-write pkexec call still works as a fallback.
+}
+
 fn main() {
+    // Ask for privileges up front instead of at write time. The rpi-imager
+    // model: GUI runs as root, every action already has the access it
+    // needs, no second prompt mid-flash. Trade-off: the WebView runs as
+    // root too, so we keep the CSP strict and treat the embedded JS as
+    // trusted (it ships in our bundle, not loaded from the network).
+    #[cfg(target_os = "linux")]
+    elevate_if_needed();
+
     // WebKitGTK EGL workaround for AppImage on Wayland.
     // The AppImage bundles an older libwayland-client.so that conflicts with
     // the system Mesa driver, causing "Could not create default EGL display:
