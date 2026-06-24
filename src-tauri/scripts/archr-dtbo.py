@@ -818,10 +818,27 @@ def make_dtbo(dtb_data, args):
         elif force_simple_audio_routing:
             rk817_path = hpdet_ovl.path+'/__overlay__/rk817-sound-simple'
             args['logger'].info("audio: simple variant (SRs flag: external amp on regulator)")
+        elif 'SDCLONE' in args['flags']:
+            # Clone subdevice (rk3326-gameconsole-eeclone.dts) does NOT
+            # include r3xs.dtsi, so there is no default `rk817-sound`
+            # node already active in the base DTS — both `amplified`
+            # and `simple` variants ship status="disabled". When the
+            # vendor DTB doesn't expose an amp GPIO we have to enable
+            # SOMETHING explicitly or `aplay -l` reports "no
+            # soundcards" (issue #35). Amplified is the safe default:
+            # the vast majority of R36S clones (V20 2024-05 onward)
+            # carry an external amp gated by a GPIO line that just
+            # isn't surfaced in the partial vendor DTB. Users on the
+            # rare amp-less clones can pick a _SRs (simple) overlay
+            # variant from the flasher.
+            rk817_path = hpdet_ovl.path+'/__overlay__/rk817-sound-amplified'
+            args['logger'].info("audio: amplified fallback (SDCLONE without detectable amp gpio — eeclone base has no default rk817-sound)")
         else:
-            # No amp GPIO detected, no SRs flag, no NAm flag. Keep the
-            # default rk817-sound (amp routing) active. This preserves
-            # R36S original/clone behaviour that worked under RC-3.
+            # No amp GPIO detected, no SRs flag, no NAm flag, and the
+            # subdevice has a default rk817-sound active in its base
+            # DTS (original / soysauce — via r3xs.dtsi). Keep that
+            # default; previous behaviour preserved for everything
+            # that already worked under RC-3.
             rk817_path = None
             args['logger'].info("audio: keeping default rk817-sound (amp routing from base DTS)")
 
