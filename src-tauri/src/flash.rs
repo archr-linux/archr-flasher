@@ -218,53 +218,31 @@ pub fn flash_image_privileged(
         app.clone(), progress_file.clone(), image_size, stop.clone(),
     );
 
-    // We start out elevated already (main.rs elevate_if_needed re-launched
-    // the whole app via pkexec on startup, rpi-imager style). So no per-
-    // write pkexec prompt is needed. We still wrap the bash invocation in
-    // systemd-inhibit so the screen/lid/idle locks are paused for the
-    // whole flash window: sleeping in the middle of a write can corrupt
-    // the SD (kernel writes-in-flight get lost when the controller
-    // resumes). Fallback path keeps pkexec as a safety net if elevation
-    // at startup somehow failed (polkit absent, headless session, etc.)
-    // and the app is still running as a non-root uid.
-    let am_root = unsafe { libc::geteuid() } == 0;
+    // Wrap pkexec inside systemd-inhibit so the screen/lid/idle locks
+    // are paused for the whole flash window. Sleeping in the middle of
+    // a write can corrupt the SD (kernel writes-in-flight get lost
+    // when the controller resumes). If systemd-inhibit isn't available
+    // (very old systemd / non-systemd init), we fall back to plain
+    // pkexec; suspend is then user-responsibility.
     let has_inhibit = Command::new("which")
         .arg("systemd-inhibit").output()
         .map(|o| o.status.success())
         .unwrap_or(false);
 
-    let mut cmd = match (am_root, has_inhibit) {
-        (true,  true)  => {
-            let mut c = Command::new("systemd-inhibit");
-            c.arg("--what=idle:sleep:shutdown")
-             .arg("--who=ArchR Flasher")
-             .arg("--why=Writing SD card")
-             .arg("--mode=block")
-             .arg("bash");
-            c
-        }
-        (true,  false) => Command::new("bash"),
-        (false, true)  => {
-            // Fallback: not running as root. Keep the pkexec hop for the
-            // bash invocation so flashing still works even without the
-            // startup elevation.
-            let mut c = Command::new("systemd-inhibit");
-            c.arg("--what=idle:sleep:shutdown")
-             .arg("--who=ArchR Flasher")
-             .arg("--why=Writing SD card")
-             .arg("--mode=block")
-             .arg("pkexec")
-             .arg("bash");
-            c
-        }
-        (false, false) => {
-            let mut c = Command::new("pkexec");
-            c.arg("bash");
-            c
-        }
+    let mut cmd = if has_inhibit {
+        let mut c = Command::new("systemd-inhibit");
+        c.arg("--what=idle:sleep:shutdown")
+         .arg("--who=ArchR Flasher")
+         .arg("--why=Writing SD card")
+         .arg("--mode=block")
+         .arg("pkexec");
+        c
+    } else {
+        Command::new("pkexec")
     };
 
     let child = cmd
+        .arg("bash")
         .arg(&script_path)
         .arg(img_to_flash.to_str().unwrap_or(""))
         .arg(device)
@@ -273,10 +251,10 @@ pub fn flash_image_privileged(
         .arg(&progress_file)
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to spawn flash helper: {}", e))?;
+        .map_err(|e| format!("Failed to run pkexec: {}", e))?;
 
     let output = child.wait_with_output()
-        .map_err(|e| format!("Failed to wait for flash helper: {}", e))?;
+        .map_err(|e| format!("Failed to wait for pkexec: {}", e))?;
 
     // Stop polling thread
     stop.store(true, Ordering::Relaxed);
