@@ -30,20 +30,16 @@
           <span class="step-num">2</span>
           <span class="step-label" data-i18n="step_image">Image</span>
         </div>
-        <div class="step" data-step="panel">
+        <div class="step" data-step="overlay">
           <span class="step-num">3</span>
-          <span class="step-label" data-i18n="step_panel">Panel</span>
-        </div>
-        <div class="step" data-step="customize">
-          <span class="step-num">4</span>
-          <span class="step-label" data-i18n="step_customize">Customize</span>
+          <span class="step-label" data-i18n="step_overlay">Overlay</span>
         </div>
         <div class="step" data-step="disk">
-          <span class="step-num">5</span>
+          <span class="step-num">4</span>
           <span class="step-label" data-i18n="step_disk">SD Card</span>
         </div>
         <div class="step" data-step="flash">
-          <span class="step-num">6</span>
+          <span class="step-num">5</span>
           <span class="step-label" data-i18n="step_flash">Flash</span>
         </div>
       </nav>
@@ -54,16 +50,12 @@
           <span class="step-num">1</span>
           <span class="step-label" data-i18n="step_detect">Detect SD</span>
         </div>
-        <div class="step" data-step="ovl-panel">
+        <div class="step" data-step="ovl-overlay">
           <span class="step-num">2</span>
-          <span class="step-label" data-i18n="step_panel">Panel</span>
-        </div>
-        <div class="step" data-step="ovl-customize">
-          <span class="step-num">3</span>
-          <span class="step-label" data-i18n="step_customize">Customize</span>
+          <span class="step-label" data-i18n="step_overlay">Overlay</span>
         </div>
         <div class="step" data-step="ovl-apply">
-          <span class="step-num">4</span>
+          <span class="step-num">3</span>
           <span class="step-label" data-i18n="step_apply">Apply</span>
         </div>
       </nav>
@@ -117,68 +109,26 @@
         </div>
 
         <!-- Step: Panel -->
-        <div class="step-content" id="page-panel">
-          <div class="panel-disclaimer" id="panel-disclaimer">
-            <div class="disclaimer-icon">&#9888;</div>
-            <p data-i18n="panel_disclaimer"></p>
-            <button class="btn btn-sm" id="btn-dismiss-disclaimer" data-i18n="panel_disclaimer_ok">OK, got it</button>
-          </div>
-          <div id="panel-options" class="hidden">
-            <select id="panel-select" class="select">
-              <option value="" data-i18n="select_panel">Select panel</option>
-            </select>
-            <div class="hint" data-i18n="panel_hint">Choose the panel that matches your device screen.</div>
-
-            <div class="separator"></div>
-            <div class="custom-dtb-section">
-              <button class="btn btn-outline" id="btn-custom-dtb" data-i18n="custom_dtb">Generate from custom DTB...</button>
-              <button class="btn btn-outline btn-link-style" id="btn-online-generator" data-i18n="online_generator">Online Overlay Generator</button>
-              <small class="hint" data-i18n="custom_dtb_hint">Provide your own stock firmware DTB to generate an overlay.</small>
-              <div id="panel-status" class="status"></div>
+        <div class="step-content" id="page-overlay">
+          <div class="overlay-pick">
+            <p class="overlay-intro" data-i18n="overlay_intro">
+              The panel overlay (<code>mipi-panel.dtbo</code>) is now generated on the website.
+              Use the online generator, download the file, then pick it here.
+            </p>
+            <a class="btn btn-primary" id="btn-open-generator-flash" href="https://arch-r.io/overlay-generator" target="_blank" rel="noopener" data-i18n="open_generator">
+              Open the Overlay Generator
+            </a>
+            <div class="overlay-file-row">
+              <button class="btn btn-outline" id="btn-pick-overlay-flash" data-i18n="pick_overlay">Pick mipi-panel.dtbo…</button>
+              <span class="overlay-picked" id="overlay-picked-flash" data-i18n="no_overlay_picked">No file selected</span>
             </div>
-          </div>
-        </div>
-
-        <!-- Step: Customize -->
-        <div class="step-content" id="page-customize">
-          <div class="setting-group">
-            <div class="setting-row">
-              <span data-i18n="rotation">Rotation</span>
-              <select id="rotation-select" class="select-sm">
-                <option value="0">0°</option>
-                <option value="90">90°</option>
-                <option value="180">180°</option>
-                <option value="270">270°</option>
-              </select>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="invert_lstick">Invert left stick</span>
-              <label class="toggle"><input type="checkbox" id="invert-lstick"><span class="toggle-track"></span></label>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="invert_rstick">Invert right stick</span>
-              <label class="toggle"><input type="checkbox" id="invert-rstick"><span class="toggle-track"></span></label>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="hp_invert">Invert HP detect</span>
-              <label class="toggle"><input type="checkbox" id="hp-invert"><span class="toggle-track"></span></label>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="joypad_variant">Joypad driver</span>
-              <select id="joypad-variant" class="select-sm">
-                <option value="auto" data-i18n="joypad_auto">Auto</option>
-                <option value="k36" data-i18n="joypad_k36">Force K36</option>
-                <option value="my_mini" data-i18n="joypad_mymini">Force My Mini</option>
-              </select>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="force_simple_audio">Force simple audio routing</span>
-              <label class="toggle"><input type="checkbox" id="force-simple-audio"><span class="toggle-track"></span></label>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="skip_vendor_mode">Skip vendor display mode</span>
-              <label class="toggle"><input type="checkbox" id="skip-vendor-mode"><span class="toggle-track"></span></label>
-            </div>
+            <p class="overlay-hint" data-i18n="overlay_skip_hint">
+              Skip this step only if your hardware boots fine with the default overlay shipped in the image.
+            </p>
+            <label class="overlay-skip">
+              <input type="checkbox" id="overlay-skip-flash">
+              <span data-i18n="overlay_skip_label">Use default overlay (skip)</span>
+            </label>
           </div>
         </div>
 
@@ -219,68 +169,22 @@
           <div class="current-info hidden" id="overlay-current-info">
             <div class="setting-row"><span data-i18n="overlay_panel_name">Panel</span><span id="ovl-cur-name" class="val">--</span></div>
             <div class="setting-row"><span data-i18n="overlay_variant">Variant</span><span id="ovl-cur-variant" class="val">--</span></div>
-            <div class="setting-row"><span data-i18n="rotation">Rotation</span><span id="ovl-cur-rotation" class="val">0°</span></div>
-            <div class="setting-row"><span data-i18n="invert_lstick">L-stick inv.</span><span id="ovl-cur-lstick" class="val">--</span></div>
-            <div class="setting-row"><span data-i18n="invert_rstick">R-stick inv.</span><span id="ovl-cur-rstick" class="val">--</span></div>
-            <div class="setting-row"><span data-i18n="hp_invert">HP inv.</span><span id="ovl-cur-hp" class="val">--</span></div>
           </div>
         </div>
 
-        <!-- Overlay: Panel -->
-        <div class="step-content" id="page-ovl-panel">
-          <div class="card-grid compact">
-            <button class="card sm" data-console="original"><strong data-i18n="original_name">Original</strong></button>
-            <button class="card sm" data-console="clone"><strong data-i18n="clone_name">Clone</strong></button>
-            <button class="card sm" data-console="soysauce"><strong data-i18n="soysauce_name">Soysauce</strong></button>
-          </div>
-          <select id="overlay-panel-select" class="select" style="margin-top:12px;">
-            <option value="" data-i18n="select_panel">Select panel</option>
-          </select>
-
-          <div class="separator"></div>
-          <button class="btn btn-outline" id="btn-ovl-custom-dtb" data-i18n="custom_dtb">Generate from custom DTB...</button>
-          <button class="btn btn-outline btn-link-style" id="btn-ovl-online-generator" data-i18n="online_generator">Online Overlay Generator</button>
-        </div>
-
-        <!-- Overlay: Customize -->
-        <div class="step-content" id="page-ovl-customize">
-          <div class="setting-group">
-            <div class="setting-row">
-              <span data-i18n="rotation">Rotation</span>
-              <select id="overlay-rotation-select" class="select-sm">
-                <option value="0">0°</option>
-                <option value="90">90°</option>
-                <option value="180">180°</option>
-                <option value="270">270°</option>
-              </select>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="invert_lstick">Invert left stick</span>
-              <label class="toggle"><input type="checkbox" id="overlay-invert-lstick"><span class="toggle-track"></span></label>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="invert_rstick">Invert right stick</span>
-              <label class="toggle"><input type="checkbox" id="overlay-invert-rstick"><span class="toggle-track"></span></label>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="hp_invert">Invert HP detect</span>
-              <label class="toggle"><input type="checkbox" id="overlay-hp-invert"><span class="toggle-track"></span></label>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="joypad_variant">Joypad driver</span>
-              <select id="overlay-joypad-variant" class="select-sm">
-                <option value="auto" data-i18n="joypad_auto">Auto</option>
-                <option value="k36" data-i18n="joypad_k36">Force K36</option>
-                <option value="my_mini" data-i18n="joypad_mymini">Force My Mini</option>
-              </select>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="force_simple_audio">Force simple audio routing</span>
-              <label class="toggle"><input type="checkbox" id="overlay-force-simple-audio"><span class="toggle-track"></span></label>
-            </div>
-            <div class="setting-row">
-              <span data-i18n="skip_vendor_mode">Skip vendor display mode</span>
-              <label class="toggle"><input type="checkbox" id="overlay-skip-vendor-mode"><span class="toggle-track"></span></label>
+        <!-- Overlay: pick generated dtbo -->
+        <div class="step-content" id="page-ovl-overlay">
+          <div class="overlay-pick">
+            <p class="overlay-intro" data-i18n="overlay_intro">
+              The panel overlay (<code>mipi-panel.dtbo</code>) is now generated on the website.
+              Use the online generator, download the file, then pick it here.
+            </p>
+            <a class="btn btn-primary" id="btn-open-generator-ovl" href="https://arch-r.io/overlay-generator" target="_blank" rel="noopener" data-i18n="open_generator">
+              Open the Overlay Generator
+            </a>
+            <div class="overlay-file-row">
+              <button class="btn btn-outline" id="btn-pick-overlay-ovl" data-i18n="pick_overlay">Pick mipi-panel.dtbo…</button>
+              <span class="overlay-picked" id="overlay-picked-ovl" data-i18n="no_overlay_picked">No file selected</span>
             </div>
           </div>
         </div>

@@ -61,7 +61,6 @@ name = "archr-flasher"
 version = "1.3.3"
 dependencies = [
  "cc",
- "fdt",
  "flate2",
  "fs2",
  "md-5",
@@ -744,12 +743,6 @@ checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
 ]
-
-[[package]]
-name = "fdt"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "784a4df722dc6267a04af36895398f59d21d07dce47232adf31ec0ff2fa45e67"
 
 [[package]]
 name = "field-offset"
