@@ -24,6 +24,20 @@
 //      already did it via the shell preamble in the GUI flow); we
 //      don't try to manage it ourselves.
 
+// This helper is Linux-only: it relies on O_DIRECT, posix_fadvise and
+// /proc/sys/vm/drop_caches, none of which exist on macOS or Windows
+// (std::os::unix is not even available on Windows). The GUI uses a
+// different write path on those platforms, so gate the whole helper
+// behind target_os = "linux" and ship a stub main elsewhere to keep the
+// cross-platform release build green.
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("archr-flash-write is only supported on Linux");
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "linux")]
+mod imp {
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::env;
 use std::fs::{File, OpenOptions};
@@ -107,7 +121,7 @@ const CHUNK_BYTES: usize = 4 * 1024 * 1024;      // pwrite chunk size
 const FSYNC_INTERVAL_BYTES: u64 = 64 * 1024 * 1024; // fsync cadence
 const O_DIRECT: i32 = 0x4000;                     // not exported by libc on every target
 
-fn main() -> ExitCode {
+pub fn entry() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     // Optional `--no-verify` may appear anywhere after the binary name.
     // The three positional args (image, device, progress_file) keep the
@@ -352,4 +366,10 @@ fn verify_device(
             "verify: short read on device ({} of {} bytes)", read_so_far, bytes));
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+} // mod imp
+
+#[cfg(target_os = "linux")]
+fn main() -> std::process::ExitCode {
+    imp::entry()
 }
