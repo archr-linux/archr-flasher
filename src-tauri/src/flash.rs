@@ -898,16 +898,25 @@ pub fn flash_image_privileged(
     validate_device(device)?;
 
     let is_xz = image_path.ends_with(".xz");
+    let is_gz = image_path.ends_with(".gz") && !is_xz;
+    let needs_decompress = is_xz || is_gz;
 
-    if is_xz {
+    if needs_decompress {
         check_temp_space(image_path)?;
     }
 
-    // Step 1: Decompress .xz in user space (with progress)
-    let img_to_flash = if is_xz {
+    // Step 1: Decompress .xz or .gz in user space (with progress). The
+    // PowerShell writer streams the file to the device raw, so a gzipped
+    // image (the format ArchR ships) must be expanded here first, exactly
+    // like the Linux and macOS paths do.
+    let img_to_flash = if needs_decompress {
         emit_progress(app, 0.0, "decompressing");
         let temp_img = std::env::temp_dir().join("archr-flash-temp.img");
-        decompress_xz(app, image_path, &temp_img)?;
+        if is_xz {
+            decompress_xz(app, image_path, &temp_img)?;
+        } else {
+            decompress_gz(app, image_path, &temp_img)?;
+        }
         temp_img
     } else {
         PathBuf::from(image_path)
