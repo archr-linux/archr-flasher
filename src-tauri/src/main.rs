@@ -103,6 +103,7 @@ async fn flash_image(
     device: String,
     overlay_path: String,
     variant: String,
+    verify: bool,
 ) -> Result<String, String> {
     let app_clone = app.clone();
 
@@ -183,6 +184,7 @@ async fn flash_image(
             &device,
             trimmed_overlay,
             &variant,
+            verify,
         )?;
 
         if is_compressed {

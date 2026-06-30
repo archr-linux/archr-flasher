@@ -2,7 +2,6 @@
   "title_flasher": "烧录器",
   "tab_flash": "烧录",
   "tab_overlay": "覆盖层",
-
   "step_console": "主机",
   "step_image": "镜像",
   "step_overlay": "覆盖层",
@@ -10,10 +9,8 @@
   "step_flash": "烧录",
   "step_detect": "检测 SD",
   "step_apply": "应用",
-
   "back": "返回",
   "next": "下一步",
-
   "select_console": "选择您的主机",
   "original_name": "R36S 原版",
   "original_desc": "原厂主板",
@@ -21,7 +18,6 @@
   "clone_desc": "克隆主板变体",
   "soysauce_name": "R36S Soysauce",
   "soysauce_desc": "Soysauce 版本",
-
   "select_image": "选择镜像",
   "no_image": "未选择镜像",
   "select_file": "选择文件",
@@ -29,7 +25,6 @@
   "checking_version": "正在检查最新版本...",
   "latest_version": "最新: {version}",
   "offline": "离线",
-
   "overlay_intro": "面板覆盖层 (mipi-panel.dtbo) 现在在网站上生成。请使用在线生成器，下载文件，然后在此处选择。",
   "open_generator": "打开覆盖层生成器",
   "pick_overlay": "选择 mipi-panel.dtbo...",
@@ -38,10 +33,8 @@
   "overlay_skip_hint": "仅当您的硬件可以正常使用镜像中默认的覆盖层启动时，才跳过此步骤。",
   "overlay_skip_label": "使用默认覆盖层 (跳过)",
   "overlay_default_image": "默认 (来自镜像)",
-
   "select_sd": "选择 SD 卡",
   "select_sd_title": "选择 SD 卡",
-
   "flash": "烧录",
   "confirm_title": "确认烧录",
   "confirm_text": "将 Arch R 烧录到 {disk}？",
@@ -58,11 +51,9 @@
   "writing_safe": "正在写入 (安全模式)...",
   "done": "SD 卡已就绪！插入 R36S 后开机。",
   "flash_cancelled": "烧录已取消。",
-
   "sd_slow_warning": "检测到 SD 卡速度较慢 ({speed} MB/s)。建议使用高质量 SD 卡 (Class 10 / U1 或更高)。写入将变慢以防止损坏。",
   "sd_medium_info": "SD 卡速度：{speed} MB/s，可接受。",
   "sd_fast_info": "SD 卡速度：{speed} MB/s，良好。",
-
   "error": "错误",
   "error_no_space": "磁盘空间不足以解压。",
   "error_device_removed": "未找到设备。SD 卡是否已被取出？",
@@ -78,7 +69,6 @@
   "error_flash_failed": "烧录失败。请检查 SD 卡是否插入且未写保护。",
   "error_verify_failed": "校验失败：SD 卡内容与写入的镜像不一致。请尝试其他 SD 卡。",
   "error_invalid_device": "所选设备无效。",
-
   "overlay_sd": "SD 卡",
   "overlay_no_sd": "请插入 Arch R SD 卡",
   "overlay_panel_name": "面板：",
@@ -88,11 +78,11 @@
   "overlay_not_archr": "此 SD 卡不包含 Arch R。",
   "overlay_applying": "正在应用覆盖层...",
   "overlay_applied": "覆盖层应用成功！",
-
   "app_update_title": "可用更新",
   "app_update_text": "版本 {version} 可用。现在更新？",
   "app_updating": "正在更新...",
-
   "yes": "是",
-  "no": "否"
+  "no": "否",
+  "verify_label": "写入后校验",
+  "verify_hint": "读回 SD 卡并将其 SHA-256 与镜像比较。会增加 1-2 分钟，可发现损坏的 SD 卡和损坏的写入。"
 }

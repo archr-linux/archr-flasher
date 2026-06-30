@@ -145,6 +145,13 @@
         <!-- Step: Flash -->
         <div class="step-content" id="page-flash">
           <div class="summary" id="flash-summary"></div>
+          <label class="overlay-skip" id="verify-toggle-row">
+            <input type="checkbox" id="verify-toggle" checked>
+            <span data-i18n="verify_label">Verify after writing</span>
+          </label>
+          <p class="overlay-hint" data-i18n="verify_hint">
+            Reads the SD card back and compares its SHA-256 against the image. Adds 1-2 minutes but catches bad cards and corrupted writes.
+          </p>
           <div class="progress-section hidden" id="flash-progress">
             <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
             <div class="progress-info">

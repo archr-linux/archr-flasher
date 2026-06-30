@@ -185,6 +185,7 @@ pub fn flash_image_privileged(
     device: &str,
     custom_dtbo_path: &str,
     variant: &str,
+    verify: bool,
 ) -> Result<(), String> {
     use std::process::{Command, Stdio};
     use std::os::unix::fs::PermissionsExt;
@@ -283,6 +284,7 @@ pub fn flash_image_privileged(
         .arg(variant)
         .arg(&progress_file)
         .arg(helper_path.to_str().unwrap_or(""))
+        .arg(if verify { "1" } else { "0" })
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to run pkexec: {}", e))?;
@@ -431,6 +433,7 @@ CUSTOM_DTBO="$3"
 VARIANT="$4"
 PROGRESS_FILE="$5"
 HELPER="$6"
+VERIFY="$7"   # "1" = run the SHA-256 verify pass, "0" = skip it
 
 # Up-front diagnostics. When the script aborts later for any reason,
 # this preamble lets the maintainer correlate "what was the input?"
@@ -579,7 +582,11 @@ echo "STAGE:writing" > "$PROGRESS_FILE"
 # helper publishes live byte counts to PROGRESS_FILE for the writing
 # bar and "STAGE:verifying:NN" for the verify bar; the existing Rust
 # poller already speaks both.
-"$HELPER" "$IMAGE" "$DEVICE" "$PROGRESS_FILE"
+HELPER_ARGS=()
+if [ "$VERIFY" = "0" ]; then
+    HELPER_ARGS+=("--no-verify")
+fi
+"$HELPER" "${HELPER_ARGS[@]}" "$IMAGE" "$DEVICE" "$PROGRESS_FILE"
 HELPER_RC=$?
 
 if [ "$HELPER_RC" -ne 0 ]; then
@@ -673,7 +680,9 @@ pub fn flash_image_privileged(
     device: &str,
     custom_dtbo_path: &str,
     variant: &str,
+    verify: bool,
 ) -> Result<(), String> {
+    let _ = verify;  // TODO: thread through into osascript invocation
     use std::process::{Command, Stdio};
     use std::os::unix::fs::PermissionsExt;
 
@@ -878,7 +887,9 @@ pub fn flash_image_privileged(
     device: &str,
     custom_dtbo_path: &str,
     variant: &str,
+    verify: bool,
 ) -> Result<(), String> {
+    let _ = verify;  // TODO: thread through into PowerShell flash
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 

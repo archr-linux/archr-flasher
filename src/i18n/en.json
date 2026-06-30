@@ -2,7 +2,6 @@
   "title_flasher": "FLASHER",
   "tab_flash": "Flash",
   "tab_overlay": "Overlay",
-
   "step_console": "Console",
   "step_image": "Image",
   "step_overlay": "Overlay",
@@ -10,10 +9,8 @@
   "step_flash": "Flash",
   "step_detect": "Detect SD",
   "step_apply": "Apply",
-
   "back": "BACK",
   "next": "NEXT",
-
   "select_console": "Select your console",
   "original_name": "R36S Original",
   "original_desc": "Original vendor board",
@@ -21,7 +18,6 @@
   "clone_desc": "Clone board variant",
   "soysauce_name": "R36S Soysauce",
   "soysauce_desc": "Soysauce edition",
-
   "select_image": "Select image",
   "no_image": "No image selected",
   "select_file": "Select file",
@@ -29,7 +25,6 @@
   "checking_version": "Checking latest version...",
   "latest_version": "Latest: {version}",
   "offline": "Offline",
-
   "overlay_intro": "The panel overlay (mipi-panel.dtbo) is now generated on the website. Use the online generator, download the file, then pick it here.",
   "open_generator": "Open the Overlay Generator",
   "pick_overlay": "Pick mipi-panel.dtbo...",
@@ -38,10 +33,8 @@
   "overlay_skip_hint": "Skip this step only if your hardware boots fine with the default overlay shipped in the image.",
   "overlay_skip_label": "Use default overlay (skip)",
   "overlay_default_image": "default (from image)",
-
   "select_sd": "Select SD card",
   "select_sd_title": "Select SD card",
-
   "flash": "FLASH",
   "confirm_title": "Confirm flash",
   "confirm_text": "Flash Arch R to {disk}?",
@@ -58,11 +51,9 @@
   "writing_safe": "Writing (safe mode)...",
   "done": "SD card ready! Insert in R36S and power on.",
   "flash_cancelled": "Flash cancelled.",
-
   "sd_slow_warning": "Slow SD card detected ({speed} MB/s). We recommend using a quality SD card (Class 10 / U1 or higher). Writing will be slower to prevent corruption.",
   "sd_medium_info": "SD card speed: {speed} MB/s, acceptable.",
   "sd_fast_info": "SD card speed: {speed} MB/s, good.",
-
   "error": "Error",
   "error_no_space": "Not enough disk space for decompression.",
   "error_device_removed": "Device not found. Was the SD card removed?",
@@ -78,7 +69,6 @@
   "error_flash_failed": "Flash failed. Check that the SD card is inserted and not write-protected.",
   "error_verify_failed": "Verification failed: SD card contents differ from written image. Try a different SD card.",
   "error_invalid_device": "Invalid device selected.",
-
   "overlay_sd": "SD Card",
   "overlay_no_sd": "Insert an Arch R SD card",
   "overlay_panel_name": "Panel:",
@@ -88,11 +78,11 @@
   "overlay_not_archr": "This SD card does not contain Arch R.",
   "overlay_applying": "Applying overlay...",
   "overlay_applied": "Overlay applied successfully!",
-
   "app_update_title": "Update Available",
   "app_update_text": "Version {version} available. Update now?",
   "app_updating": "Updating...",
-
   "yes": "Yes",
-  "no": "No"
+  "no": "No",
+  "verify_label": "Verify after writing",
+  "verify_hint": "Reads the SD card back and compares its SHA-256 against the image. Adds 1-2 minutes but catches bad cards and corrupted writes."
 }

@@ -61,6 +61,9 @@ let imagePath = null;
 // ships with.
 let flashOverlayPath = '';
 let flashOverlaySkip = false;
+// Default on, like rpi-imager. The user can opt out by unchecking the
+// "Verify after writing" box on the Flash step.
+let verifyEnabled = true;
 
 // Overlay-mode state (apply overlay to an existing ArchR SD card).
 let overlayBootPath = null;
@@ -276,6 +279,10 @@ $('btn-pick-overlay-flash')?.addEventListener('click', async () => {
   }
 });
 
+$('verify-toggle')?.addEventListener('change', (e) => {
+  verifyEnabled = e.target.checked;
+});
+
 $('overlay-skip-flash')?.addEventListener('change', (e) => {
   flashOverlaySkip = e.target.checked;
   if (flashOverlaySkip) {
@@ -460,6 +467,7 @@ async function startFlash() {
       device: selectedDisk,
       overlayPath: flashOverlayPath,
       variant: selectedConsole,
+      verify: verifyEnabled,
     });
     $('progress-fill').style.width = '100%';
     $('progress-percent').textContent = '100%';

@@ -2,7 +2,6 @@
   "title_flasher": "GRAVADOR",
   "tab_flash": "Gravar",
   "tab_overlay": "Overlay",
-
   "step_console": "Console",
   "step_image": "Imagem",
   "step_overlay": "Overlay",
@@ -10,10 +9,8 @@
   "step_flash": "Gravar",
   "step_detect": "Detectar SD",
   "step_apply": "Aplicar",
-
   "back": "VOLTAR",
   "next": "AVANÇAR",
-
   "select_console": "Selecione seu console",
   "original_name": "R36S Original",
   "original_desc": "Placa original do fabricante",
@@ -21,7 +18,6 @@
   "clone_desc": "Variante de placa clone",
   "soysauce_name": "R36S Soysauce",
   "soysauce_desc": "Edição Soysauce",
-
   "select_image": "Selecione a imagem",
   "no_image": "Nenhuma imagem selecionada",
   "select_file": "Selecionar arquivo",
@@ -29,7 +25,6 @@
   "checking_version": "Verificando última versão...",
   "latest_version": "Última: {version}",
   "offline": "Offline",
-
   "overlay_intro": "O overlay do painel (mipi-panel.dtbo) agora é gerado no site. Use o gerador on-line, baixe o arquivo e selecione-o aqui.",
   "open_generator": "Abrir o Gerador de Overlay",
   "pick_overlay": "Escolher mipi-panel.dtbo...",
@@ -38,10 +33,8 @@
   "overlay_skip_hint": "Ignore esta etapa apenas se o seu hardware já funciona com o overlay padrão da imagem.",
   "overlay_skip_label": "Usar overlay padrão (ignorar)",
   "overlay_default_image": "padrão (da imagem)",
-
   "select_sd": "Selecione o cartão SD",
   "select_sd_title": "Selecione o cartão SD",
-
   "flash": "GRAVAR",
   "confirm_title": "Confirmar gravação",
   "confirm_text": "Gravar Arch R em {disk}?",
@@ -58,11 +51,9 @@
   "writing_safe": "Gravando (modo seguro)...",
   "done": "Cartão SD pronto! Insira no R36S e ligue.",
   "flash_cancelled": "Gravação cancelada.",
-
   "sd_slow_warning": "Cartão SD lento detectado ({speed} MB/s). Recomendamos usar um cartão de qualidade (Classe 10 / U1 ou superior). A gravação será mais lenta para evitar corrupção.",
   "sd_medium_info": "Velocidade do SD: {speed} MB/s, aceitável.",
   "sd_fast_info": "Velocidade do SD: {speed} MB/s, boa.",
-
   "error": "Erro",
   "error_no_space": "Espaço em disco insuficiente para descompactar.",
   "error_device_removed": "Dispositivo não encontrado. O cartão SD foi removido?",
@@ -78,7 +69,6 @@
   "error_flash_failed": "Falha na gravação. Verifique se o cartão SD está inserido e sem proteção contra escrita.",
   "error_verify_failed": "Falha na verificação: o conteúdo do cartão SD difere da imagem gravada. Tente outro cartão.",
   "error_invalid_device": "Dispositivo selecionado inválido.",
-
   "overlay_sd": "Cartão SD",
   "overlay_no_sd": "Insira um cartão SD com Arch R",
   "overlay_panel_name": "Painel:",
@@ -88,11 +78,11 @@
   "overlay_not_archr": "Este cartão SD não contém Arch R.",
   "overlay_applying": "Aplicando overlay...",
   "overlay_applied": "Overlay aplicado com sucesso!",
-
   "app_update_title": "Atualização disponível",
   "app_update_text": "Versão {version} disponível. Atualizar agora?",
   "app_updating": "Atualizando...",
-
   "yes": "Sim",
-  "no": "Não"
+  "no": "Não",
+  "verify_label": "Verificar após gravar",
+  "verify_hint": "Le o cartão SD e compara o SHA-256 com a imagem. Acrescenta 1-2 minutos mas detecta cartões ruins e gravações corrompidas."
 }
