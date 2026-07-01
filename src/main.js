@@ -634,24 +634,39 @@ function buildOverlaySummary() {
 // https://arch-r.io/overlay-generator, run the generator with their
 // vendor DTB, download mipi-panel.dtbo, and pick it through the
 // file-picker step.
-const openOnlineGenerator = async (ev) => {
-  const url = 'https://arch-r.io/overlay-generator/';
+const OVERLAY_GENERATOR_URL = 'https://arch-r.io/overlay-generator/';
+
+// Actually navigate to the generator (Tauri opener, else a new browser tab).
+const openGeneratorUrl = async () => {
   try {
     if (window.__TAURI__?.opener?.openUrl) {
-      if (ev) ev.preventDefault();
-      await window.__TAURI__.opener.openUrl(url);
+      await window.__TAURI__.opener.openUrl(OVERLAY_GENERATOR_URL);
     } else if (window.__TAURI__?.shell?.open) {
-      if (ev) ev.preventDefault();
-      await window.__TAURI__.shell.open(url);
+      await window.__TAURI__.shell.open(OVERLAY_GENERATOR_URL);
+    } else {
+      window.open(OVERLAY_GENERATOR_URL, '_blank', 'noopener');
     }
-    // Without a Tauri opener, the anchor's default href + target=_blank
-    // already opens the URL in the user's browser; don't preventDefault.
   } catch (e) {
     console.error('Could not open online generator URL:', e);
   }
 };
-$('btn-open-generator-flash')?.addEventListener('click', openOnlineGenerator);
-$('btn-open-generator-ovl')?.addEventListener('click', openOnlineGenerator);
+
+// Clicking "Open Generator" first shows a warning: users MUST use the
+// original vendor .dtb, not one from dArkOS / ArkOS / clones. Only after
+// acknowledging do we open the generator site.
+const showGeneratorWarning = (ev) => {
+  if (ev) ev.preventDefault();
+  $('generator-warn-dialog').classList.remove('hidden');
+};
+$('btn-open-generator-flash')?.addEventListener('click', showGeneratorWarning);
+$('btn-open-generator-ovl')?.addEventListener('click', showGeneratorWarning);
+$('btn-generator-cancel')?.addEventListener('click', () => {
+  $('generator-warn-dialog').classList.add('hidden');
+});
+$('btn-generator-ack')?.addEventListener('click', async () => {
+  $('generator-warn-dialog').classList.add('hidden');
+  await openGeneratorUrl();
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -689,6 +704,11 @@ function translateError(msg) {
     [/^offline:|network|dns|connect|timeout|reqwest::Error|tcp.*reset/i, 'error_network'],
     [/checksum.*fail|sha256 mismatch/i, 'error_checksum_failed'],
     [/verify_failed/i, 'error_verify_failed'],
+    // Stable tokens from the native Windows writer (flash_windows.rs).
+    [/err:write_protected/i, 'error_write_protected'],
+    [/err:device_busy/i, 'error_device_busy'],
+    [/err:media/i, 'error_media'],
+    [/err:open_device/i, 'error_open_device'],
     [/failed to run pkexec|osascript error|failed to run powershell/i, 'error_privilege'],
     [/not authorized|dismissed/i, 'error_privilege'],
     [/decompress error|xzdecoder/i, 'error_decompress'],

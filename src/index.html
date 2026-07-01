@@ -115,7 +115,7 @@
               The panel overlay (<code>mipi-panel.dtbo</code>) is now generated on the website.
               Use the online generator, download the file, then pick it here.
             </p>
-            <a class="btn btn-primary" id="btn-open-generator-flash" href="https://arch-r.io/overlay-generator" target="_blank" rel="noopener" data-i18n="open_generator">
+            <a class="btn btn-primary" id="btn-open-generator-flash" target="_blank" rel="noopener" data-i18n="open_generator">
               Open the Overlay Generator
             </a>
             <div class="overlay-file-row">
@@ -186,7 +186,7 @@
               The panel overlay (<code>mipi-panel.dtbo</code>) is now generated on the website.
               Use the online generator, download the file, then pick it here.
             </p>
-            <a class="btn btn-primary" id="btn-open-generator-ovl" href="https://arch-r.io/overlay-generator" target="_blank" rel="noopener" data-i18n="open_generator">
+            <a class="btn btn-primary" id="btn-open-generator-ovl" target="_blank" rel="noopener" data-i18n="open_generator">
               Open the Overlay Generator
             </a>
             <div class="overlay-file-row">
@@ -221,6 +221,18 @@
       <div class="dialog-buttons">
         <button class="btn" id="btn-cancel" data-i18n="cancel">Cancel</button>
         <button class="btn btn-danger" id="btn-confirm" data-i18n="confirm">Flash</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Overlay generator warning dialog -->
+  <div class="dialog-overlay hidden" id="generator-warn-dialog">
+    <div class="dialog">
+      <h3 data-i18n="generator_warn_title">Warning</h3>
+      <p class="warning" data-i18n="generator_warn_text">Use the original (<code>.dtb</code>) file from your console! Not a (<code>.dtb</code>) from dArkOS, ArkOSRE, ArkOS4Clones or any system other than your original card's!</p>
+      <div class="dialog-buttons">
+        <button class="btn" id="btn-generator-cancel" data-i18n="cancel">Cancel</button>
+        <button class="btn btn-primary" id="btn-generator-ack" data-i18n="generator_warn_ack">I'm aware</button>
       </div>
     </div>
   </div>
