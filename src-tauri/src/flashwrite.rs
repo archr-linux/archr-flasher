@@ -1,51 +1,40 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 ArchR
 //
-// archr-flash-write: privileged helper invoked under pkexec from the
-// GUI. Replaces the bash + dd path that was bottlenecking on
-// oflag=dsync.
+// Privileged flash-write helper, folded into the main binary as the
+// hidden `__flash-write` subcommand (see main.rs). It used to be a
+// separate cargo binary under src/bin/, but that gave the crate two
+// binaries and the Tauri bundler could not tell which one was the app,
+// so the installer shipped the wrong executable and the GUI never
+// started. As a subcommand there is exactly one binary on every
+// platform, always shipped side-by-side with itself.
 //
-// Layout:
-//   archr-flash-write <image> <device> <progress_file>
+// Invocation (under pkexec, from the Linux flash script):
+//   archr-flasher __flash-write [--no-verify] <image> <device> <progress_file>
 //
 // Behaviour:
 //   1. Open image (read) and device (write+O_DIRECT when supported).
 //   2. Loop pwrite() in 4 MiB chunks; no dsync per chunk.
 //   3. fsync() every 64 MiB so the kernel cannot accumulate gigabytes
 //      of dirty pages and stall at the end.
-//   4. After write: fsync, drop caches via /proc/sys/vm/drop_caches,
-//      stream-verify SHA-256 of the SD content against the source.
+//   4. After write: fsync, drop caches via posix_fadvise, stream-verify
+//      SHA-256 of the SD content against the source.
 //   5. Throughout: byte counters written to <progress_file> in two
 //      forms:
-//        - bare integer  → bytes written so far (Rust polling thread
-//          maps it to 55:90% writing bar in the GUI)
-//        - "STAGE:verifying:NN"  → percent through verify
-//   6. udisks2 is masked/stopped before this binary runs (the parent
-//      already did it via the shell preamble in the GUI flow); we
-//      don't try to manage it ourselves.
+//        - bare integer  -> bytes written so far (Rust polling thread
+//          maps it to the 55:90% writing bar in the GUI)
+//        - "STAGE:verifying:NN"  -> percent through verify
+//
+// This module is Linux-only (relies on O_DIRECT, posix_fadvise): it is
+// only declared with #[cfg(target_os = "linux")] in main.rs, so the
+// whole file compiles nowhere else.
 
-// This helper is Linux-only: it relies on O_DIRECT, posix_fadvise and
-// /proc/sys/vm/drop_caches, none of which exist on macOS or Windows
-// (std::os::unix is not even available on Windows). The GUI uses a
-// different write path on those platforms, so gate the whole helper
-// behind target_os = "linux" and ship a stub main elsewhere to keep the
-// cross-platform release build green.
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("archr-flash-write is only supported on Linux");
-    std::process::exit(1);
-}
-
-#[cfg(target_os = "linux")]
-mod imp {
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
-use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
-use std::process::ExitCode;
 use std::time::Instant;
 use sha2::{Sha256, Digest};
 
@@ -121,21 +110,22 @@ const CHUNK_BYTES: usize = 4 * 1024 * 1024;      // pwrite chunk size
 const FSYNC_INTERVAL_BYTES: u64 = 64 * 1024 * 1024; // fsync cadence
 const O_DIRECT: i32 = 0x4000;                     // not exported by libc on every target
 
-pub fn entry() -> ExitCode {
-    let args: Vec<String> = env::args().collect();
-    // Optional `--no-verify` may appear anywhere after the binary name.
-    // The three positional args (image, device, progress_file) keep the
-    // same order. rpi-imager exposes the same toggle on the CLI as
+/// Subcommand entry point. `args` is everything after the
+/// `__flash-write` token (image, device, progress_file, plus an
+/// optional `--no-verify` anywhere). Returns the process exit code.
+pub fn entry(args: &[String]) -> i32 {
+    // `--no-verify` may appear anywhere among the args. The three
+    // positional args (image, device, progress_file) keep the same
+    // order. rpi-imager exposes the same toggle on the CLI as
     // `--disable-verify`; we keep our spelling consistent with the
     // existing flasher copy ("verify after writing").
     let verify_enabled = !args.iter().any(|a| a == "--no-verify");
     let positional: Vec<&String> = args.iter()
-        .skip(1)
         .filter(|a| !a.starts_with("--"))
         .collect();
     if positional.len() < 3 {
-        eprintln!("usage: archr-flash-write [--no-verify] <image> <device> <progress_file>");
-        return ExitCode::from(2);
+        eprintln!("usage: archr-flasher __flash-write [--no-verify] <image> <device> <progress_file>");
+        return 2;
     }
     let image_path = positional[0];
     let device_path = positional[1];
@@ -149,10 +139,10 @@ pub fn entry() -> ExitCode {
 
     if let Err(e) = run(image_path, device_path, progress_path, verify_enabled) {
         eprintln!("flash error: {}", e);
-        return ExitCode::from(1);
+        return 1;
     }
     eprintln!("=== archr-flash-write done ===");
-    ExitCode::SUCCESS
+    0
 }
 
 fn write_progress(path: &str, content: &str) {
@@ -187,11 +177,8 @@ fn run(
     // flushed at the end and looks like a stall.
     //
     // O_DIRECT requires the buffer to be aligned to the device's block
-    // size (usually 512 bytes or 4 KiB). We allocate via Vec<u8> and the
-    // global allocator gives us at minimum 8-byte alignment; for SD
-    // controllers that report 4 KiB block size we need explicit
-    // alignment. We use posix_memalign through a small helper to make
-    // it portable.
+    // size (usually 512 bytes or 4 KiB). We allocate via AlignedBuffer
+    // to satisfy that; the global allocator alone would not.
     let device = OpenOptions::new()
         .write(true)
         .custom_flags(O_DIRECT)
@@ -366,10 +353,4 @@ fn verify_device(
             "verify: short read on device ({} of {} bytes)", read_so_far, bytes));
     }
     Ok(format!("{:x}", hasher.finalize()))
-}
-} // mod imp
-
-#[cfg(target_os = "linux")]
-fn main() -> std::process::ExitCode {
-    imp::entry()
 }

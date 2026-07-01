@@ -260,14 +260,13 @@ pub fn flash_image_privileged(
         Command::new("pkexec")
     };
 
-    // Locate the native write helper. Tauri installs both binaries
-    // side-by-side; the debug/release build dirs (target/debug,
-    // target/release) also have them as siblings.
+    // The native write helper is the app binary itself, run as the
+    // `__flash-write` subcommand (see main.rs). Using our own exe means
+    // it is always present next to the GUI (it IS the GUI), so there is
+    // nothing extra for the bundler to ship. The script invokes it as
+    // `"$HELPER" __flash-write ...`.
     let helper_path = std::env::current_exe()
-        .map_err(|e| format!("cannot resolve exe path: {}", e))?
-        .parent()
-        .ok_or_else(|| "no parent dir on exe path".to_string())?
-        .join("archr-flash-write");
+        .map_err(|e| format!("cannot resolve exe path: {}", e))?;
     if !helper_path.is_file() {
         return Err(format!(
             "Native write helper not found at {}",
@@ -586,7 +585,7 @@ HELPER_ARGS=()
 if [ "$VERIFY" = "0" ]; then
     HELPER_ARGS+=("--no-verify")
 fi
-"$HELPER" "${HELPER_ARGS[@]}" "$IMAGE" "$DEVICE" "$PROGRESS_FILE"
+"$HELPER" __flash-write "${HELPER_ARGS[@]}" "$IMAGE" "$DEVICE" "$PROGRESS_FILE"
 HELPER_RC=$?
 
 if [ "$HELPER_RC" -ne 0 ]; then

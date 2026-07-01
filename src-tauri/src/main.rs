@@ -5,6 +5,12 @@ mod disk;
 mod flash;
 mod github;
 mod overlay;
+// Privileged disk-write helper, run as the hidden `__flash-write`
+// subcommand (see main()). Linux-only: it relies on O_DIRECT /
+// posix_fadvise. Folding it in here keeps the crate at a single binary
+// so the Tauri bundler always ships the GUI as the app.
+#[cfg(target_os = "linux")]
+mod flashwrite;
 
 use disk::DiskInfo;
 use github::{DownloadResult, ReleaseInfo};
@@ -283,6 +289,19 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn main() {
+    // Privileged write helper. When invoked as `archr-flasher
+    // __flash-write ...` (from the Linux flash script, under pkexec),
+    // run the disk writer and exit before Tauri initializes. This must
+    // be the very first thing main() does so the GUI/Wayland re-exec
+    // below never runs for the helper path.
+    #[cfg(target_os = "linux")]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(|s| s == "__flash-write").unwrap_or(false) {
+            std::process::exit(flashwrite::entry(&args[2..]));
+        }
+    }
+
     // WebKitGTK EGL workaround for AppImage on Wayland.
     // The AppImage bundles an older libwayland-client.so that conflicts with
     // the system Mesa driver, causing "Could not create default EGL display:

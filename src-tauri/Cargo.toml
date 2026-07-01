@@ -4,6 +4,17 @@ version = "1.3.3"
 description = "Arch R SD Card Flasher"
 authors = ["Arch R Linux"]
 edition = "2024"
+default-run = "archr-flasher"
+
+# The GUI app is the only binary in this crate. The privileged
+# disk-write helper is NOT a separate binary; it runs as the
+# `__flash-write` subcommand of this same binary (see src/flashwrite.rs).
+# Keeping a single binary is deliberate: a second [[bin]] made the Tauri
+# bundler ship the wrong executable, so the installed app would not
+# start. Declared explicitly + default-run to lock the choice in.
+[[bin]]
+name = "archr-flasher"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
