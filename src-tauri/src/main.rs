@@ -11,6 +11,18 @@ mod overlay;
 // so the Tauri bundler always ships the GUI as the app.
 #[cfg(target_os = "linux")]
 mod flashwrite;
+// Per-OS flash orchestration, split out of flash.rs so each platform owns
+// its own logic. flash.rs keeps the shared helpers and re-exports the right
+// flash_image_privileged per target.
+#[cfg(target_os = "linux")]
+mod flash_linux;
+#[cfg(target_os = "macos")]
+mod flash_macos;
+// Native Windows raw-disk writer (ported from rpi-imager) + its orchestration.
+// Replaces the fragile PowerShell Clear-Disk + FileStream write that surfaced
+// as "write-protected" errors.
+#[cfg(target_os = "windows")]
+mod flash_windows;
 
 use disk::DiskInfo;
 use github::{DownloadResult, ReleaseInfo};
