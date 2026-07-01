@@ -869,6 +869,14 @@ cp "$CUSTOM_DTBO" "$BOOT_VOL/overlays/mipi-panel.dtbo"
 # Write variant file
 echo -n "$VARIANT" > "$BOOT_VOL/variant"
 
+# Switch extlinux config for soysauce variant (uses explicit FDT),
+# matching the Linux flash path. Without it the board keeps the default
+# extlinux.conf and the console never boots.
+if [ "$VARIANT" = "soysauce" ] && [ -f "$BOOT_VOL/extlinux/extlinux.conf.soysauce" ]; then
+    cp "$BOOT_VOL/extlinux/extlinux.conf" "$BOOT_VOL/extlinux/extlinux.conf.bak"
+    cp "$BOOT_VOL/extlinux/extlinux.conf.soysauce" "$BOOT_VOL/extlinux/extlinux.conf"
+fi
+
 sync
 
 # Eject disk safely
@@ -1112,6 +1120,22 @@ try {{
 
     # Write variant file
     Set-Content -Path (Join-Path $bootDrive "variant") -Value $Variant -NoNewline
+
+    # Switch extlinux config for the soysauce variant (it boots with an
+    # explicit FDT). This mirrors the Linux flash path; without it the
+    # board keeps the default extlinux.conf, ignores extlinux.conf.soysauce,
+    # and the console never boots.
+    if ($Variant -eq 'soysauce') {{
+        $extlinuxDir = Join-Path $bootDrive "extlinux"
+        $extlinuxConf = Join-Path $extlinuxDir "extlinux.conf"
+        $soysauceConf = Join-Path $extlinuxDir "extlinux.conf.soysauce"
+        if (Test-Path $soysauceConf) {{
+            if (Test-Path $extlinuxConf) {{
+                Copy-Item $extlinuxConf (Join-Path $extlinuxDir "extlinux.conf.bak") -Force
+            }}
+            Copy-Item $soysauceConf $extlinuxConf -Force
+        }}
+    }}
 
     exit 0
 }} catch {{
