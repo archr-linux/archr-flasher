@@ -116,6 +116,23 @@ pub fn flash_image_privileged(
         ));
     }
 
+    // Under an AppImage, current_exe() points inside the user's FUSE
+    // mount (/tmp/.mount_*), which root cannot read: FUSE denies other
+    // users by default, root included. The pkexec'd script then failed
+    // to exec the helper and the flash died immediately with a generic
+    // error, while the .deb/.rpm installs (exe in /usr/bin) worked.
+    // Stage a root-readable copy of the exe outside the mount.
+    let helper_path = if std::env::var_os("APPIMAGE").is_some() {
+        let staged = std::env::temp_dir().join("archr-flash-helper");
+        fs::copy(&helper_path, &staged)
+            .map_err(|e| format!("Cannot stage helper for pkexec: {}", e))?;
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("Cannot set helper permissions: {}", e))?;
+        staged
+    } else {
+        helper_path
+    };
+
     let child = cmd
         .arg("bash")
         .arg(&script_path)
@@ -143,6 +160,9 @@ pub fn flash_image_privileged(
     // (5 GB) until reboot. needs_decompress covers both branches.
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(&progress_file);
+    if std::env::var_os("APPIMAGE").is_some() {
+        let _ = fs::remove_file(std::env::temp_dir().join("archr-flash-helper"));
+    }
     if needs_decompress {
         let _ = fs::remove_file(&img_to_flash);
     }
