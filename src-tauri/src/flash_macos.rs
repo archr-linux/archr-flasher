@@ -21,34 +21,7 @@ use tauri::{AppHandle, Emitter};
 use serde::Serialize;
 use crate::flash::{emit_progress, validate_device, check_temp_space, poll_flash_progress, decompress_xz, decompress_gz};
 use crate::rawwrite_unix::{receive_fd_from_helper, write_image_to_raw_fd, configure_boot_volume, FdHelperError};
-
-/// Streaming diagnostic log: every line lands on disk the moment it is
-/// pushed, so crashes and kills still leave a complete trace. Reset at
-/// the start of each flash.
-#[cfg(target_os = "macos")]
-struct DiagLog {
-    file: Option<File>,
-}
-
-#[cfg(target_os = "macos")]
-impl DiagLog {
-    fn new(path: &Path) -> Self {
-        let file = File::create(path).ok();
-        let mut log = DiagLog { file };
-        log.push_str(&format!(
-            "archr-flasher {} flash log\n",
-            env!("CARGO_PKG_VERSION")
-        ));
-        log
-    }
-
-    fn push_str(&mut self, line: &str) {
-        if let Some(f) = self.file.as_mut() {
-            let _ = f.write_all(line.as_bytes());
-            let _ = f.flush();
-        }
-    }
-}
+use crate::diaglog::DiagLog;
 
 #[cfg(target_os = "macos")]
 pub fn flash_image_privileged(
@@ -59,22 +32,13 @@ pub fn flash_image_privileged(
     variant: &str,
     verify: bool,
 ) -> Result<(), String> {
-    let log_path = std::env::temp_dir().join("archr-flasher-macos.log");
-    // Reset per run and stream every stage as it happens, so even a hard
-    // crash leaves the full story on disk for bug reports.
-    let mut diag = DiagLog::new(&log_path);
+    let mut diag = DiagLog::new();
     let result = flash_core(app, image_path, device, custom_dtbo_path, variant, verify, &mut diag);
     match &result {
         Ok(()) => diag.push_str("result: success\n"),
         Err(e) => diag.push_str(&format!("result: {}\n", e)),
     }
-    result.map_err(|e| {
-        if e == "cancelled" {
-            e
-        } else {
-            format!("{} (log: {})", e, log_path.display())
-        }
-    })
+    result.map_err(crate::diaglog::with_log_hint)
 }
 
 #[cfg(target_os = "macos")]

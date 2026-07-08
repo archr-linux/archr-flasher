@@ -16,6 +16,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
 use crate::flash::{emit_progress, validate_device, check_temp_space, poll_flash_progress, decompress_xz, decompress_gz};
+use crate::diaglog::DiagLog;
 
 // ---------------------------------------------------------------------------
 // Linux: pkexec + helper script
@@ -29,10 +30,34 @@ pub fn flash_image_privileged(
     variant: &str,
     verify: bool,
 ) -> Result<(), String> {
+    let mut diag = DiagLog::new();
+    let result = flash_core_linux(
+        app, image_path, device, custom_dtbo_path, variant, verify, &mut diag,
+    );
+    match &result {
+        Ok(()) => diag.push_str("result: success\n"),
+        Err(e) => diag.push_str(&format!("result: {}\n", e)),
+    }
+    result.map_err(crate::diaglog::with_log_hint)
+}
+
+#[cfg(target_os = "linux")]
+fn flash_core_linux(
+    app: &AppHandle,
+    image_path: &str,
+    device: &str,
+    custom_dtbo_path: &str,
+    variant: &str,
+    verify: bool,
+    diag: &mut DiagLog,
+) -> Result<(), String> {
     use std::process::{Command, Stdio};
     use std::os::unix::fs::PermissionsExt;
 
     validate_device(device)?;
+    diag.push_str(&format!(
+        "device: {}\nimage: {}\nverify: {}\n", device, image_path, verify
+    ));
 
     let is_xz = image_path.ends_with(".xz");
     let is_gz = image_path.ends_with(".gz") && !is_xz;
@@ -89,6 +114,7 @@ pub fn flash_image_privileged(
         .arg("systemd-inhibit").output()
         .map(|o| o.status.success())
         .unwrap_or(false);
+    diag.push_str(&format!("systemd-inhibit available: {}\n", has_inhibit));
 
     let mut cmd = if has_inhibit {
         let mut c = Command::new("systemd-inhibit");
@@ -149,6 +175,15 @@ pub fn flash_image_privileged(
 
     let output = child.wait_with_output()
         .map_err(|e| format!("Failed to wait for pkexec: {}", e))?;
+
+    // The helper script narrates every stage to stderr; keep the whole
+    // capture in the diagnostic log regardless of the outcome (no env
+    // or secrets ever go through this channel).
+    diag.push_str(&format!(
+        "helper exit: {:?}\n--- helper stderr ---\n{}\n---\n",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ));
 
     // Stop polling thread
     stop.store(true, Ordering::Relaxed);

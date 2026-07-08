@@ -232,7 +232,7 @@ fn ioctl(h: Handle, code: u32) -> bool {
 /// WriteFile came back ERROR_ACCESS_DENIED). Dropping the returned handles
 /// releases the locks. Best-effort: a volume that can't be locked is still
 /// dismounted and its handle kept.
-fn lock_and_dismount_volumes(disk: u32) -> Vec<OwnedHandle> {
+fn lock_and_dismount_volumes(disk: u32, diag: &mut DiagLog) -> Vec<OwnedHandle> {
     let mut held = Vec::new();
     // SAFETY: no arguments.
     let mask = unsafe { GetLogicalDrives() };
@@ -270,6 +270,7 @@ fn lock_and_dismount_volumes(disk: u32) -> Vec<OwnedHandle> {
         }
 
         eprintln!("[flash-win] locking + dismounting volume {}:", letter);
+        diag.push_str(&format!("volume {}: lock+dismount\n", letter));
         let vh = match open_handle(&vol_path, GENERIC_READ | GENERIC_WRITE, 0) {
             Ok(h) => h,
             Err(_) => continue,
@@ -293,6 +294,9 @@ fn lock_and_dismount_volumes(disk: u32) -> Vec<OwnedHandle> {
         ioctl(vh.0, FSCTL_DISMOUNT_VOLUME);
         if !locked {
             eprintln!("[flash-win] warning: could not lock {}: — write may still be denied", letter);
+            diag.push_str(&format!("volume {}: LOCK FAILED, write may be denied\n", letter));
+        } else {
+            diag.push_str(&format!("volume {}: locked\n", letter));
         }
 
         // Remove the drive letter so Explorer stops probing it (mountpoint
@@ -344,6 +348,7 @@ pub fn write_image(
     image_path: &str,
     progress_path: &str,
     verify: bool,
+    diag: &mut DiagLog,
 ) -> Result<(), String> {
     let disk = extract_disk_number(device)?;
     let image_size = std::fs::metadata(image_path)
@@ -354,6 +359,10 @@ pub fn write_image(
     eprintln!("  device = {} (disk {})", device, disk);
     eprintln!("  image  = {} ({} bytes)", image_path, image_size);
     eprintln!("  verify = {}", verify);
+    diag.push_str(&format!(
+        "native write: device {} (disk {}), image {} ({} bytes), verify {}\n",
+        device, disk, image_path, image_size, verify
+    ));
 
     // Lock + dismount the disk's volumes and HOLD the locks for the whole
     // write+verify. Two things matter here (learned from Rufus, format.c):
@@ -364,25 +373,45 @@ pub fn write_image(
     //     reassign the volume, which invalidates the lock we are holding and
     //     re-arms the write protection. The image write lays down the new
     //     partition table itself, so no pre-clean is needed.
-    let volume_locks = lock_and_dismount_volumes(disk);
+    let volume_locks = lock_and_dismount_volumes(disk, diag);
 
     write_progress(progress_path, "STAGE:writing");
-    let write_hash = write_pass(device, image_path, image_size, progress_path)?;
+    let write_hash = match write_pass(device, image_path, image_size, progress_path) {
+        Ok(h) => {
+            diag.push_str(&format!("write pass done, sha256 {}\n", h));
+            h
+        }
+        Err(e) => {
+            diag.push_str(&format!("write pass failed: {}\n", e));
+            return Err(e);
+        }
+    };
 
     if verify {
         write_progress(progress_path, "STAGE:verifying:0");
-        let read_hash = verify_pass(device, image_size, progress_path)?;
+        let read_hash = match verify_pass(device, image_size, progress_path) {
+            Ok(h) => h,
+            Err(e) => {
+                diag.push_str(&format!("verify read failed: {}\n", e));
+                return Err(e);
+            }
+        };
         if read_hash != write_hash {
             eprintln!("  verify mismatch: expected {} got {}", write_hash, read_hash);
+            diag.push_str(&format!(
+                "verify mismatch: wrote {}, read back {}\n", write_hash, read_hash
+            ));
             return Err("verify_failed".to_string());
         }
         eprintln!("  verify ok: {}", read_hash);
+        diag.push_str("verify ok, hashes match\n");
     }
 
     // Release the volume locks so the freshly-written partitions can mount
     // for the config step, then ask Windows to re-read the partition table.
     drop(volume_locks);
     rescan_disk(device);
+    diag.push_str("volume locks released, disk rescanned\n");
     write_progress(progress_path, "STAGE:done");
     Ok(())
 }
@@ -544,6 +573,8 @@ fn verify_pass(device: &str, image_size: u64, progress_path: &str) -> Result<Str
 #[allow(unused_imports)]
 use crate::flash::{emit_progress, validate_device, check_temp_space, poll_flash_progress, decompress_xz, decompress_gz};
 #[allow(unused_imports)]
+use crate::diaglog::DiagLog;
+#[allow(unused_imports)]
 use std::fs;
 #[allow(unused_imports)]
 use std::path::PathBuf;
@@ -571,7 +602,36 @@ pub fn flash_image_privileged(
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+    let mut diag = DiagLog::new();
+    let result = flash_core_windows(
+        app, image_path, device, custom_dtbo_path, variant, verify, &mut diag,
+    );
+    match &result {
+        Ok(()) => diag.push_str("result: success\n"),
+        Err(e) => diag.push_str(&format!("result: {}\n", e)),
+    }
+    result.map_err(crate::diaglog::with_log_hint)
+}
+
+#[cfg(target_os = "windows")]
+fn flash_core_windows(
+    app: &AppHandle,
+    image_path: &str,
+    device: &str,
+    custom_dtbo_path: &str,
+    variant: &str,
+    verify: bool,
+    diag: &mut DiagLog,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
     validate_device(device)?;
+    diag.push_str(&format!(
+        "device: {}\nimage: {}\nverify: {}\n", device, image_path, verify
+    ));
 
     let is_xz = image_path.ends_with(".xz");
     let is_gz = image_path.ends_with(".gz") && !is_xz;
@@ -624,6 +684,7 @@ pub fn flash_image_privileged(
         &img_to_flash.to_string_lossy(),
         &progress_file.to_string_lossy(),
         verify,
+        diag,
     );
 
     stop.store(true, Ordering::Relaxed);
@@ -664,12 +725,18 @@ pub fn flash_image_privileged(
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(&progress_file);
 
+    let cfg_stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    diag.push_str(&format!(
+        "config script: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
+        output.status, cfg_stdout.trim(), stderr.trim()
+    ));
+
     if output.status.success() {
         emit_progress(app, 100.0, "done");
         return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
     Err(format!("Flash failed: {}", stderr.trim()))
 }
 
