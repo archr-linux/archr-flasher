@@ -39,7 +39,7 @@
     ],
     "resources": [],
     "macOS": {
-      "signingIdentity": "-",
+      "signingIdentity": null,
       "entitlements": null
     }
   },

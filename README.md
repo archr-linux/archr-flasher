@@ -32,7 +32,7 @@ Cross-platform desktop app for flashing [Arch R](https://github.com/archr-linux/
 | Linux    | glibc 2.31+, `webkit2gtk-4.1`, `gtk-3`, `libayatana-appindicator3` |
 | macOS    | macOS 10.15+, Apple Silicon |
 
-> **macOS says the app "is damaged and can't be opened".** The app is not damaged: it is not notarized with Apple (that requires a paid Apple Developer account), so Gatekeeper blocks anything downloaded from a browser. After installing, clear the quarantine flag once:
+> **macOS says the app "is damaged and can't be opened".** Releases from v1.3.5 on are signed and notarized with Apple, so this should not happen with a fresh download of the latest DMG. If you still hit it (older release, or a download that got a stale quarantine flag), clear the flag once:
 >
 > ```bash
 > xattr -cr "/Applications/Arch R Flasher.app"
