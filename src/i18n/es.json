@@ -91,5 +91,6 @@
   "yes": "Sí",
   "no": "No",
   "verify_label": "Verificar tras escribir",
-  "verify_hint": "Lee la SD y compara su SHA-256 con la imagen. Suma 1-2 minutos pero detecta tarjetas defectuosas y escrituras corruptas."
+  "verify_hint": "Lee la SD y compara su SHA-256 con la imagen. Suma 1-2 minutos pero detecta tarjetas defectuosas y escrituras corruptas.",
+  "error_mount_boot": "La imagen se grabó, pero la partición de arranque no se montó para instalar el overlay del panel. Retire y reinserte la tarjeta y copie overlays/mipi-panel.dtbo manualmente con el generador de overlays."
 }

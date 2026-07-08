@@ -709,6 +709,8 @@ function translateError(msg) {
     [/err:device_busy/i, 'error_device_busy'],
     [/err:media/i, 'error_media'],
     [/err:open_device/i, 'error_open_device'],
+    [/err:dd_write/i, 'error_write_failed'],
+    [/err:mount_boot/i, 'error_mount_boot'],
     [/failed to run pkexec|osascript error|failed to run powershell/i, 'error_privilege'],
     [/not authorized|dismissed/i, 'error_privilege'],
     [/decompress error|xzdecoder/i, 'error_decompress'],

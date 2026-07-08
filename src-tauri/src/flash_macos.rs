@@ -122,12 +122,29 @@ pub fn flash_image_privileged(
         let _ = fs::remove_file(&img_to_flash);
     }
 
+    // Keep a diagnostic log regardless of outcome; the UI shows a short
+    // translated message, this file carries the real story for reports.
+    let log_path = std::env::temp_dir().join("archr-flasher-macos.log");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let _ = fs::write(&log_path, format!(
+        "exit: {:?}\ndevice: {}\nimage: {}\n--- script stderr ---\n{}",
+        output.status, device, img_to_flash.display(), stderr
+    ));
+
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("User canceled") || stderr.contains("-128") {
             return Err("cancelled".into());
         }
-        return Err(format!("Flash failed: {}", stderr));
+        // Stable tokens from the helper script win over the generic text.
+        for token in ["err:dd_write", "err:mount_boot"] {
+            if stderr.contains(token) {
+                return Err(format!("{} (log: {})", token, log_path.display()));
+            }
+        }
+        if stderr.to_lowercase().contains("busy") {
+            return Err("err:device_busy".into());
+        }
+        return Err(format!("Flash failed: {} (log: {})", stderr, log_path.display()));
     }
 
     emit_progress(app, 95.0, "syncing");
@@ -167,32 +184,57 @@ if [ -n "$DEVICE_BYTES" ] && [ "$DEVICE_BYTES" -gt $((2 * 1024 * 1024)) ] 2>/dev
 fi
 sync
 
-# dd in background, monitor via SIGINFO
-DD_STDERR=$(mktemp)
-dd if="$IMAGE" of="$RDISK" bs=4m 2>"$DD_STDERR" &
-DD_PID=$!
+# dd in background, monitor via SIGINFO. One retry after a fresh force
+# unmount: macOS occasionally remounts the card between our unmount and
+# the raw open, and the first dd then dies with "Resource busy".
+run_dd() {
+    DD_STDERR=$(mktemp)
+    dd if="$IMAGE" of="$RDISK" bs=4m 2>"$DD_STDERR" &
+    DD_PID=$!
+    while kill -0 $DD_PID 2>/dev/null; do
+        sleep 1
+        kill -INFO $DD_PID 2>/dev/null || true
+        sleep 0.5
+        # BSD dd prints "N bytes transferred" to stderr
+        BYTES=$(tail -1 "$DD_STDERR" 2>/dev/null | grep -o '^[0-9]*' || true)
+        if [ -n "$BYTES" ] && [ "$BYTES" -gt 0 ] 2>/dev/null; then
+            echo "$BYTES" > "$PROGRESS_FILE"
+        fi
+    done
+    wait $DD_PID
+    DD_RC=$?
+    return $DD_RC
+}
 
-# Monitor progress: send SIGINFO periodically, parse stderr for bytes
-while kill -0 $DD_PID 2>/dev/null; do
-    sleep 1
-    kill -INFO $DD_PID 2>/dev/null || true
-    sleep 0.5
-    # BSD dd prints "N bytes transferred" to stderr
-    BYTES=$(tail -1 "$DD_STDERR" 2>/dev/null | grep -o '^[0-9]*' || true)
-    if [ -n "$BYTES" ] && [ "$BYTES" -gt 0 ] 2>/dev/null; then
-        echo "$BYTES" > "$PROGRESS_FILE"
-    fi
-done
-wait $DD_PID
+set +e
+run_dd
+DD_RC=$?
+if [ $DD_RC -ne 0 ] && grep -qi "busy" "$DD_STDERR" 2>/dev/null; then
+    echo "dd hit Resource busy, forcing unmount and retrying once" >&2
+    diskutil unmountDisk force "$DEVICE" >&2 2>&1 || true
+    sleep 2
+    run_dd
+    DD_RC=$?
+fi
+if [ $DD_RC -ne 0 ]; then
+    echo "err:dd_write rc=$DD_RC" >&2
+    tail -3 "$DD_STDERR" >&2 2>/dev/null
+    rm -f "$DD_STDERR"
+    exit 1
+fi
 rm -f "$DD_STDERR"
+set -e
 
 sync
 
 # Re-mount disk so we can access boot partition (retry up to 3 times)
 BOOT_VOL=""
-for i in 1 2 3; do
+for i in 1 2 3 4 5; do
     sleep 2
-    diskutil mountDisk "$DEVICE" 2>/dev/null || true
+    # mountDisk mounts every volume; the explicit s1 mount covers the
+    # case where diskutil skips the boot FAT on the first pass.
+    diskutil mountDisk "$DEVICE" >&2 2>&1 || true
+    diskutil mount "${DEVICE}s1" >&2 2>&1 || true
     sleep 1
     BOOT_VOL=$(diskutil info "${DEVICE}s1" 2>/dev/null | grep "Mount Point:" | awk -F: '{print $2}' | xargs)
     [ -n "$BOOT_VOL" ] && [ -d "$BOOT_VOL" ] && break
@@ -200,7 +242,8 @@ for i in 1 2 3; do
 done
 
 if [ -z "$BOOT_VOL" ] || [ ! -d "$BOOT_VOL" ]; then
-    echo "ERROR: Could not mount boot partition to configure panel" >&2
+    echo "err:mount_boot could not mount ${DEVICE}s1 after flashing (image was written)" >&2
+    diskutil info "${DEVICE}s1" >&2 2>&1 || true
     diskutil eject "$DEVICE" 2>/dev/null || true
     exit 1
 fi
