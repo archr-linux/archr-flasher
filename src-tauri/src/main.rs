@@ -47,6 +47,25 @@ fn get_version() -> String {
 }
 
 #[tauri::command]
+fn get_flash_log() -> String {
+    // Tail of the universal flash log for the error-report dialog. 16KB
+    // keeps the dialog and the prefilled GitHub issue manageable while
+    // preserving the failing end of the story.
+    const TAIL: usize = 16 * 1024;
+    match std::fs::read(diaglog::log_path()) {
+        Ok(bytes) => {
+            let start = bytes.len().saturating_sub(TAIL);
+            let mut text = String::from_utf8_lossy(&bytes[start..]).into_owned();
+            if start > 0 {
+                text = format!("[... {} earlier bytes omitted ...]\n{}", start, text);
+            }
+            text
+        }
+        Err(_) => String::new(),
+    }
+}
+
+#[tauri::command]
 fn list_disks() -> Vec<DiskInfo> {
     disk::list_removable_disks()
 }
@@ -378,6 +397,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_locale,
             get_version,
+            get_flash_log,
             list_disks,
             check_latest_release,
             download_image,

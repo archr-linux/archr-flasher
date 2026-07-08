@@ -475,11 +475,72 @@ async function startFlash() {
     setFlashStatus(t('done'), 'success');
   } catch (e) {
     const msg = typeof e === 'string' ? e : String(e);
-    if (msg === 'cancelled') setFlashStatus(t('flash_cancelled'), '');
-    else setFlashStatus(translateError(msg), 'error');
+    if (msg === 'cancelled') {
+      setFlashStatus(t('flash_cancelled'), '');
+    } else {
+      setFlashStatus(translateError(msg), 'error');
+      await showErrorReportDialog(msg);
+    }
   }
   setBusy(false);
 }
+
+// ---------------------------------------------------------------------------
+// Flash error report dialog: crash-reporter style popup with the diagnostic
+// log and a prefilled GitHub issue. GitHub caps URLs around 8KB, so the
+// prefilled body keeps the END of the log (where the failure lives) and
+// trims from the start until the whole URL fits in 6000 characters.
+// ---------------------------------------------------------------------------
+const FLASHER_ISSUES_URL = 'https://github.com/archr-linux/archr-flasher/issues/new';
+let lastErrorReport = { raw: '', log: '' };
+
+async function showErrorReportDialog(rawMsg) {
+  let log = '';
+  try { log = await invoke('get_flash_log'); } catch (_) {}
+  lastErrorReport = { raw: rawMsg, log };
+  $('error-report-message').textContent = translateError(rawMsg);
+  $('error-report-log').textContent = log || '(no log file found)';
+  $('error-report-dialog').classList.remove('hidden');
+}
+
+function buildIssueUrl(rawMsg, log, appVersion, osName) {
+  // First line of the raw error doubles as the issue title; err:* tokens
+  // are stable and searchable.
+  const firstLine = (rawMsg.split('\n')[0] || 'flash error').slice(0, 120);
+  const title = `[flash-error] ${firstLine} (v${appVersion}, ${osName})`;
+  const bodyFor = (logPart, truncated) =>
+    `**Error:** \`${firstLine}\`\n**Version:** ${appVersion}\n**OS:** ${osName}\n\n` +
+    `<!-- Please describe what you were doing. -->\n\n**Flash log${truncated ? ' (older lines trimmed to fit)' : ''}:**\n` +
+    '```\n' + logPart + '\n```\n';
+  const urlFor = (body) =>
+    `${FLASHER_ISSUES_URL}?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+
+  let logPart = log || '(log file empty)';
+  let truncated = false;
+  let url = urlFor(bodyFor(logPart, truncated));
+  while (url.length > 6000 && logPart.length > 0) {
+    truncated = true;
+    // Drop from the start, a line at a time, keeping the failing tail.
+    const cut = logPart.indexOf('\n', Math.max(200, logPart.length - Math.floor((logPart.length * 5000) / url.length)));
+    logPart = cut > 0 && cut < logPart.length - 1
+      ? logPart.slice(cut + 1)
+      : logPart.slice(Math.floor(logPart.length / 2));
+    url = urlFor(bodyFor(logPart, truncated));
+  }
+  return url;
+}
+
+$('btn-error-close').addEventListener('click', () =>
+  $('error-report-dialog').classList.add('hidden'));
+
+$('btn-error-report').addEventListener('click', async () => {
+  let appVersion = '?';
+  try { appVersion = await invoke('get_version'); } catch (_) {}
+  const osName = navigator.userAgent.includes('Mac') ? 'macOS'
+    : navigator.userAgent.includes('Win') ? 'Windows' : 'Linux';
+  const url = buildIssueUrl(lastErrorReport.raw, lastErrorReport.log, appVersion, osName);
+  try { await openExternalUrl(url); } catch (e) { console.error('Could not open issue URL:', e); }
+});
 
 // Format bytes as MB or GB with 1 decimal. We intentionally use 1024
 // (MiB/GiB) here because that's what dd writes and what users expect
@@ -636,16 +697,21 @@ function buildOverlaySummary() {
 // file-picker step.
 const OVERLAY_GENERATOR_URL = 'https://arch-r.io/overlay-generator/';
 
+// Open any external URL (Tauri opener, else shell, else a browser tab).
+async function openExternalUrl(url) {
+  if (window.__TAURI__?.opener?.openUrl) {
+    await window.__TAURI__.opener.openUrl(url);
+  } else if (window.__TAURI__?.shell?.open) {
+    await window.__TAURI__.shell.open(url);
+  } else {
+    window.open(url, '_blank', 'noopener');
+  }
+}
+
 // Actually navigate to the generator (Tauri opener, else a new browser tab).
 const openGeneratorUrl = async () => {
   try {
-    if (window.__TAURI__?.opener?.openUrl) {
-      await window.__TAURI__.opener.openUrl(OVERLAY_GENERATOR_URL);
-    } else if (window.__TAURI__?.shell?.open) {
-      await window.__TAURI__.shell.open(OVERLAY_GENERATOR_URL);
-    } else {
-      window.open(OVERLAY_GENERATOR_URL, '_blank', 'noopener');
-    }
+    await openExternalUrl(OVERLAY_GENERATOR_URL);
   } catch (e) {
     console.error('Could not open online generator URL:', e);
   }

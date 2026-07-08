@@ -237,6 +237,20 @@
     </div>
   </div>
 
+  <!-- Flash error report dialog -->
+  <div class="dialog-overlay hidden" id="error-report-dialog">
+    <div class="dialog dialog-wide">
+      <h3 data-i18n="error_report_title">Something went wrong</h3>
+      <p id="error-report-message" class="warning"></p>
+      <p data-i18n="error_report_hint">The diagnostic log below describes what happened. You can send it to the developers as a GitHub issue.</p>
+      <pre id="error-report-log" class="error-log"></pre>
+      <div class="dialog-buttons">
+        <button class="btn" id="btn-error-close" data-i18n="error_report_close">Close</button>
+        <button class="btn btn-primary" id="btn-error-report" data-i18n="error_report_github">Report on GitHub</button>
+      </div>
+    </div>
+  </div>
+
   <script src="main.js"></script>
 </body>
 </html>

@@ -806,3 +806,24 @@ body {
   .main-body { padding: 10px 20px; }
   .nav-bar { padding: 8px 20px 10px; }
 }
+
+/* Flash error report dialog */
+.dialog-wide {
+  max-width: 560px;
+  width: 90%;
+}
+
+.error-log {
+  max-height: 220px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  text-align: left;
+}
