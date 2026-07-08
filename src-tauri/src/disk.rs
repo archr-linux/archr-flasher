@@ -147,10 +147,13 @@ pub fn list_removable_disks() -> Vec<DiskInfo> {
 
     let mut disks = Vec::new();
 
-    // Use plain text output (not -plist XML) to list external disks.
-    // Output format: "/dev/disk2 (external, physical):" as header lines.
+    // Enumerate every physical whole disk. `diskutil list external` alone
+    // misses the built-in SDXC slot on Macs (it enumerates as
+    // "internal, physical"), which made the picker come up empty for
+    // anyone using the native card reader. Removability is decided per
+    // disk from `diskutil info` below instead.
     let output = Command::new("diskutil")
-        .args(["list", "external"])
+        .args(["list", "physical"])
         .output();
 
     let output = match output {
@@ -163,15 +166,15 @@ pub fn list_removable_disks() -> Vec<DiskInfo> {
 
     for line in stdout.lines() {
         let line = line.trim();
-        // Match lines like: "/dev/disk2 (external, physical):"
-        if line.starts_with("/dev/disk") && line.contains("external") {
+        // Header lines look like: "/dev/disk4 (external, physical):"
+        if line.starts_with("/dev/disk") && line.contains("physical") {
             if let Some(dev) = line.split_whitespace().next() {
                 device_names.push(dev.to_string());
             }
         }
     }
 
-    // Exclude boot disk (safety: never flash the system disk)
+    // Exclude the boot disk (safety: never flash the system disk)
     if let Ok(boot_info) = Command::new("diskutil").args(["info", "/"]).output() {
         let info_str = String::from_utf8_lossy(&boot_info.stdout);
         for line in info_str.lines() {
@@ -186,7 +189,6 @@ pub fn list_removable_disks() -> Vec<DiskInfo> {
     }
 
     for device in device_names {
-        // Get detailed info for each disk
         let info_output = Command::new("diskutil")
             .args(["info", &device])
             .output();
@@ -195,6 +197,8 @@ pub fn list_removable_disks() -> Vec<DiskInfo> {
             let info_str = String::from_utf8_lossy(&info.stdout);
             let mut size_bytes: u64 = 0;
             let mut name = "SD Card".to_string();
+            let mut removable = false;
+            let mut internal = false;
 
             for info_line in info_str.lines() {
                 if info_line.contains("Disk Size:") {
@@ -210,9 +214,30 @@ pub fn list_removable_disks() -> Vec<DiskInfo> {
                 if info_line.contains("Device / Media Name:") {
                     name = info_line.split(':').nth(1).unwrap_or("SD Card").trim().to_string();
                 }
+                // SD cards report "Removable Media: Removable" (built-in
+                // reader) and/or "Ejectable: Yes" (USB readers). Fixed
+                // internal drives report neither.
+                if info_line.contains("Removable Media:") && info_line.contains("Removable") {
+                    removable = true;
+                }
+                if info_line.contains("Ejectable:") && info_line.contains("Yes") {
+                    removable = true;
+                }
+                if info_line.contains("Device Location:") && info_line.contains("Internal") {
+                    internal = true;
+                }
             }
 
-            if size_bytes > 0 && size_bytes <= 128 * 1_000_000_000 {
+            // Internal fixed storage is only excluded when it is not
+            // removable media (the built-in SD slot is Internal + Removable).
+            if internal && !removable {
+                continue;
+            }
+
+            // 2TB ceiling: big enough for every SDXC card (the old 128GB
+            // cap silently hid 256GB+ cards), small enough to keep fixed
+            // multi-terabyte drives out of a destructive picker.
+            if removable && size_bytes > 0 && size_bytes <= 2_000_000_000_000 {
                 disks.push(DiskInfo {
                     device,
                     name: format!("{} ({})", name, format_size(size_bytes)),
