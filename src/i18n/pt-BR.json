@@ -92,5 +92,6 @@
   "no": "Não",
   "verify_label": "Verificar após gravar",
   "verify_hint": "Le o cartão SD e compara o SHA-256 com a imagem. Acrescenta 1-2 minutos mas detecta cartões ruins e gravações corrompidas.",
-  "error_mount_boot": "A imagem foi gravada, mas a partição de boot não montou para instalar o overlay do painel. Remova e reinsira o cartão e copie overlays/mipi-panel.dtbo manualmente com o gerador de overlays."
+  "error_mount_boot": "A imagem foi gravada, mas a partição de boot não montou para instalar o overlay do painel. Remova e reinsira o cartão e copie overlays/mipi-panel.dtbo manualmente com o gerador de overlays.",
+  "configuring": "Instalando overlay do painel..."
 }

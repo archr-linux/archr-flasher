@@ -18,6 +18,11 @@ mod flashwrite;
 mod flash_linux;
 #[cfg(target_os = "macos")]
 mod flash_macos;
+// Helper-fd handoff (SCM_RIGHTS) + raw streaming writer used by the macOS
+// path; kept OS-generic unix so the Linux host build type-checks it too.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod rawwrite_unix;
 // Native Windows raw-disk writer (ported from rpi-imager) + its orchestration.
 // Replaces the fragile PowerShell Clear-Disk + FileStream write that surfaced
 // as "write-protected" errors.

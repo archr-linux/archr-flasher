@@ -63,6 +63,7 @@ dependencies = [
  "cc",
  "flate2",
  "fs2",
+ "libc",
  "md-5",
  "reqwest 0.12.28",
  "serde",

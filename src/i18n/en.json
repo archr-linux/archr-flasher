@@ -92,5 +92,6 @@
   "no": "No",
   "verify_label": "Verify after writing",
   "verify_hint": "Reads the SD card back and compares its SHA-256 against the image. Adds 1-2 minutes but catches bad cards and corrupted writes.",
-  "error_mount_boot": "The image was written, but the boot partition did not mount to install your panel overlay. Remove and reinsert the card, then use the overlay generator to copy overlays/mipi-panel.dtbo manually."
+  "error_mount_boot": "The image was written, but the boot partition did not mount to install your panel overlay. Remove and reinsert the card, then use the overlay generator to copy overlays/mipi-panel.dtbo manually.",
+  "configuring": "Installing panel overlay..."
 }

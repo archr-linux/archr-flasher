@@ -92,5 +92,6 @@
   "no": "否",
   "verify_label": "写入后校验",
   "verify_hint": "读回 SD 卡并将其 SHA-256 与镜像比较。会增加 1-2 分钟，可发现损坏的 SD 卡和损坏的写入。",
-  "error_mount_boot": "镜像已写入，但引导分区未能挂载以安装面板 overlay。请拔出并重新插入存储卡，然后使用 overlay 生成器手动复制 overlays/mipi-panel.dtbo。"
+  "error_mount_boot": "镜像已写入，但引导分区未能挂载以安装面板 overlay。请拔出并重新插入存储卡，然后使用 overlay 生成器手动复制 overlays/mipi-panel.dtbo。",
+  "configuring": "正在安装面板 overlay..."
 }
