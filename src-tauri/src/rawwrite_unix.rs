@@ -143,7 +143,7 @@ pub fn write_image_to_raw_fd(
     image: &Path,
     device_size: Option<u64>,
     mut progress: impl FnMut(u64),
-) -> Result<u64, String> {
+) -> Result<WriteOutcome, String> {
     let zeros = vec![0u8; MB as usize];
     dev.seek(SeekFrom::Start(0))
         .map_err(|e| format!("err:write_failed seek 0: {}", e))?;
@@ -191,8 +191,53 @@ pub fn write_image_to_raw_fd(
         }
     }
 
-    full_sync(dev).map_err(|e| format!("err:write_failed flush: {}", e))?;
-    Ok(done)
+    // Raw character devices write unbuffered, and /dev/rdisk on macOS
+    // rejects F_FULLFSYNC outright; rpi-imager treats sync failures here
+    // as warnings for the same reason. Report instead of failing a flash
+    // whose bytes are already on the card.
+    if let Err(e) = full_sync(dev) {
+        return Ok(WriteOutcome { bytes: done, sync_warning: Some(e.to_string()) });
+    }
+    Ok(WriteOutcome { bytes: done, sync_warning: None })
+}
+
+/// Result of a completed raw write: byte count plus a non-fatal sync
+/// warning when the final flush was rejected by the device.
+pub struct WriteOutcome {
+    pub bytes: u64,
+    pub sync_warning: Option<String>,
+}
+
+/// Read the device back over the same descriptor and compare against the
+/// image file, chunk by chunk. Reports progress as 0..100 percent.
+pub fn verify_image_on_raw_fd(
+    dev: &mut File,
+    image: &Path,
+    image_size: u64,
+    mut progress: impl FnMut(u64),
+) -> Result<(), String> {
+    dev.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("verify_failed seek: {}", e))?;
+    let mut src = File::open(image)
+        .map_err(|e| format!("verify_failed open image: {}", e))?;
+    let mut img_buf = vec![0u8; CHUNK];
+    let mut dev_buf = vec![0u8; CHUNK];
+    let mut done: u64 = 0;
+    while done < image_size {
+        let want = std::cmp::min(CHUNK as u64, image_size - done) as usize;
+        src.read_exact(&mut img_buf[..want])
+            .map_err(|e| format!("verify_failed image read at {}: {}", done, e))?;
+        // Device reads must stay sector aligned on raw devices.
+        let aligned = ((want as u64 + SECTOR - 1) & !(SECTOR - 1)) as usize;
+        dev.read_exact(&mut dev_buf[..aligned])
+            .map_err(|e| format!("verify_failed device read at {}: {}", done, e))?;
+        if img_buf[..want] != dev_buf[..want] {
+            return Err(format!("verify_failed mismatch within {} bytes at offset {}", want, done));
+        }
+        done += want as u64;
+        progress(done * 100 / image_size.max(1));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -201,7 +246,10 @@ fn full_sync(f: &File) -> std::io::Result<()> {
     // F_FULLFSYNC forces the drive itself to flush, plain fsync on macOS
     // only pushes to the drive cache.
     if unsafe { libc::fcntl(f.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
-        return Err(std::io::Error::last_os_error());
+        // Raw devices reject F_FULLFSYNC; plain fsync is the best left.
+        if unsafe { libc::fsync(f.as_raw_fd()) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
     }
     Ok(())
 }

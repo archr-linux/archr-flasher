@@ -22,6 +22,34 @@ use serde::Serialize;
 use crate::flash::{emit_progress, validate_device, check_temp_space, poll_flash_progress, decompress_xz, decompress_gz};
 use crate::rawwrite_unix::{receive_fd_from_helper, write_image_to_raw_fd, configure_boot_volume, FdHelperError};
 
+/// Streaming diagnostic log: every line lands on disk the moment it is
+/// pushed, so crashes and kills still leave a complete trace. Reset at
+/// the start of each flash.
+#[cfg(target_os = "macos")]
+struct DiagLog {
+    file: Option<File>,
+}
+
+#[cfg(target_os = "macos")]
+impl DiagLog {
+    fn new(path: &Path) -> Self {
+        let file = File::create(path).ok();
+        let mut log = DiagLog { file };
+        log.push_str(&format!(
+            "archr-flasher {} flash log\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+        log
+    }
+
+    fn push_str(&mut self, line: &str) {
+        if let Some(f) = self.file.as_mut() {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.flush();
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn flash_image_privileged(
     app: &AppHandle,
@@ -31,12 +59,15 @@ pub fn flash_image_privileged(
     variant: &str,
     verify: bool,
 ) -> Result<(), String> {
-    let _ = verify; // TODO: read back and compare hashes over the same fd
-
     let log_path = std::env::temp_dir().join("archr-flasher-macos.log");
-    let mut diag = String::new();
-    let result = flash_core(app, image_path, device, custom_dtbo_path, variant, &mut diag);
-    let _ = fs::write(&log_path, &diag);
+    // Reset per run and stream every stage as it happens, so even a hard
+    // crash leaves the full story on disk for bug reports.
+    let mut diag = DiagLog::new(&log_path);
+    let result = flash_core(app, image_path, device, custom_dtbo_path, variant, verify, &mut diag);
+    match &result {
+        Ok(()) => diag.push_str("result: success\n"),
+        Err(e) => diag.push_str(&format!("result: {}\n", e)),
+    }
     result.map_err(|e| {
         if e == "cancelled" {
             e
@@ -53,12 +84,13 @@ fn flash_core(
     device: &str,
     custom_dtbo_path: &str,
     variant: &str,
-    diag: &mut String,
+    verify: bool,
+    diag: &mut DiagLog,
 ) -> Result<(), String> {
     use std::process::Command;
 
     validate_device(device)?;
-    diag.push_str(&format!("device: {}\nimage: {}\n", device, image_path));
+    diag.push_str(&format!("device: {}\nimage: {}\nverify: {}\n", device, image_path, verify));
 
     let is_xz = image_path.ends_with(".xz");
     let is_gz = image_path.ends_with(".gz") && !is_xz;
@@ -139,6 +171,33 @@ fn flash_core(
     let write_result = write_image_to_raw_fd(&mut dev, &img_to_flash, device_size, |done| {
         let _ = fs::write(&progress_file, done.to_string());
     });
+
+    match &write_result {
+        Ok(outcome) => {
+            diag.push_str(&format!("wrote {} bytes\n", outcome.bytes));
+            if let Some(w) = &outcome.sync_warning {
+                diag.push_str(&format!("sync warning (non-fatal): {}\n", w));
+            }
+        }
+        Err(e) => diag.push_str(&format!("write failed: {}\n", e)),
+    }
+
+    // Verify while the authorized descriptor is still open: reopening the
+    // raw device would need a second password prompt.
+    let verify_result = if verify && write_result.is_ok() {
+        diag.push_str("verifying against the image, read back over the same fd\n");
+        crate::rawwrite_unix::verify_image_on_raw_fd(&mut dev, &img_to_flash, image_size, |pct| {
+            let _ = fs::write(&progress_file, format!("STAGE:verifying:{}", pct));
+        })
+    } else {
+        Ok(())
+    };
+    if let Err(e) = &verify_result {
+        diag.push_str(&format!("verify failed: {}\n", e));
+    } else if verify && write_result.is_ok() {
+        diag.push_str("verify ok\n");
+    }
+
     drop(dev); // close the raw fd before diskutil touches the disk again
 
     stop.store(true, Ordering::Relaxed);
@@ -148,11 +207,8 @@ fn flash_core(
         let _ = fs::remove_file(&img_to_flash);
     }
 
-    match &write_result {
-        Ok(bytes) => diag.push_str(&format!("wrote {} bytes\n", bytes)),
-        Err(e) => diag.push_str(&format!("write failed: {}\n", e)),
-    }
     write_result?;
+    verify_result?;
 
     // Step 6: remount and configure the boot partition as the plain user.
     emit_progress(app, 92.0, "configuring");
@@ -206,7 +262,7 @@ fn diskutil_device_bytes(device: &str) -> Option<u64> {
 /// mountDisk mounts every volume; the explicit s1 mount covers the case
 /// where diskutil skips the boot FAT on the first pass.
 #[cfg(target_os = "macos")]
-fn mount_boot_volume(device: &str, diag: &mut String) -> Option<PathBuf> {
+fn mount_boot_volume(device: &str, diag: &mut DiagLog) -> Option<PathBuf> {
     use std::process::Command;
     let part = format!("{}s1", device);
     for attempt in 1..=5 {
