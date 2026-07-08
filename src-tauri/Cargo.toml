@@ -35,6 +35,11 @@ sha2 = "0.10"
 fs2 = "0.4"
 md-5 = "0.10"
 libc = "0.2"
+# Vendored with a relaxed FAT type check: the ArchR boot partition is a
+# below-minimum-cluster-count FAT32 the vendor U-Boots require, which
+# stock fatfs (and the macOS msdos driver) refuse. See vendor/fatfs/VENDORED.md.
+fatfs = { path = "vendor/fatfs" }
+fscommon = "0.1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 

@@ -16,7 +16,7 @@
 // this file verbatim inside a mod block, where they are not allowed;
 // the allow(dead_code) lives on the mod declaration in main.rs.
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
@@ -259,29 +259,123 @@ fn full_sync(f: &File) -> std::io::Result<()> {
     f.sync_all()
 }
 
-/// Post-flash boot partition setup, done as the regular user on the
-/// mounted FAT volume: install the panel overlay, record the variant and
-/// switch the soysauce extlinux config, mirroring the Linux flash path.
-pub fn configure_boot_volume(boot: &Path, dtbo: &Path, variant: &str) -> Result<(), String> {
+
+/// Install the panel overlay, variant marker and (for soysauce) the
+/// extlinux switch INSIDE the image file, before anything touches the
+/// card. This is how the macOS path configures the boot partition: the
+/// ArchR boot FAT is a below-spec-cluster-count FAT32 that the macOS
+/// msdos driver refuses to mount, so post-flash configuration through
+/// the OS is impossible there. Patching the image up front also means a
+/// subsequent verify pass covers the configuration bytes too.
+pub fn patch_boot_partition(image: &Path, dtbo: &Path, variant: &str) -> Result<(), String> {
+    use std::io::Read;
+
     if !dtbo.is_file() {
-        return Err(format!("Custom DTBO not found at {}", dtbo.display()));
+        return Err(format!("err:image_patch custom DTBO not found at {}", dtbo.display()));
     }
-    let overlays = boot.join("overlays");
-    fs::create_dir_all(&overlays)
-        .map_err(|e| format!("Cannot create overlays dir: {}", e))?;
-    fs::copy(dtbo, overlays.join("mipi-panel.dtbo"))
-        .map_err(|e| format!("Cannot copy overlay: {}", e))?;
-    fs::write(boot.join("variant"), variant)
-        .map_err(|e| format!("Cannot write variant: {}", e))?;
-    if variant == "soysauce" {
-        let conf = boot.join("extlinux/extlinux.conf");
-        let soy = boot.join("extlinux/extlinux.conf.soysauce");
-        if soy.is_file() {
-            fs::copy(&conf, boot.join("extlinux/extlinux.conf.bak"))
-                .map_err(|e| format!("Cannot back up extlinux.conf: {}", e))?;
-            fs::copy(&soy, &conf)
-                .map_err(|e| format!("Cannot switch extlinux.conf: {}", e))?;
+    let mut dtbo_bytes = Vec::new();
+    File::open(dtbo)
+        .and_then(|mut f| f.read_to_end(&mut dtbo_bytes))
+        .map_err(|e| format!("err:image_patch reading dtbo: {}", e))?;
+
+    let mut img = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(image)
+        .map_err(|e| format!("err:image_patch opening image: {}", e))?;
+
+    // First MBR partition entry: status byte at 446, type at 446+4,
+    // start LBA (little endian u32) at 446+8, sector count at 446+12.
+    let mut mbr = [0u8; 512];
+    img.read_exact(&mut mbr)
+        .map_err(|e| format!("err:image_patch reading MBR: {}", e))?;
+    if mbr[510] != 0x55 || mbr[511] != 0xAA {
+        return Err("err:image_patch image has no MBR signature".into());
+    }
+    let entry = &mbr[446..462];
+    let ptype = entry[4];
+    // FAT32 LBA (0x0c) or FAT32 CHS (0x0b); everything ArchR ships uses 0x0c.
+    if ptype != 0x0c && ptype != 0x0b {
+        return Err(format!(
+            "err:image_patch first partition is not FAT32 (type 0x{:02x})",
+            ptype
+        ));
+    }
+    let start_lba = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as u64;
+    let num_sectors = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as u64;
+    if start_lba == 0 || num_sectors == 0 {
+        return Err("err:image_patch empty boot partition entry".into());
+    }
+    let part_start = start_lba * 512;
+    let part_end = part_start + num_sectors * 512;
+
+    let slice = fscommon::StreamSlice::new(img, part_start, part_end)
+        .map_err(|e| format!("err:image_patch slicing partition: {}", e))?;
+    let fs = fatfs::FileSystem::new(slice, fatfs::FsOptions::new())
+        .map_err(|e| format!("err:image_patch opening FAT: {}", e))?;
+    {
+        let root = fs.root_dir();
+
+        let overlays = root
+            .create_dir("overlays")
+            .map_err(|e| format!("err:image_patch overlays dir: {}", e))?;
+        let mut f = overlays
+            .create_file("mipi-panel.dtbo")
+            .map_err(|e| format!("err:image_patch creating overlay: {}", e))?;
+        f.truncate()
+            .map_err(|e| format!("err:image_patch truncating overlay: {}", e))?;
+        f.write_all(&dtbo_bytes)
+            .map_err(|e| format!("err:image_patch writing overlay: {}", e))?;
+        drop(f);
+
+        let mut v = root
+            .create_file("variant")
+            .map_err(|e| format!("err:image_patch creating variant: {}", e))?;
+        v.truncate()
+            .map_err(|e| format!("err:image_patch truncating variant: {}", e))?;
+        v.write_all(variant.as_bytes())
+            .map_err(|e| format!("err:image_patch writing variant: {}", e))?;
+        drop(v);
+
+        if variant == "soysauce" {
+            let extlinux = root
+                .open_dir("extlinux")
+                .map_err(|e| format!("err:image_patch extlinux dir: {}", e))?;
+            let mut soys = Vec::new();
+            match extlinux.open_file("extlinux.conf.soysauce") {
+                Ok(mut f) => {
+                    f.read_to_end(&mut soys)
+                        .map_err(|e| format!("err:image_patch reading soysauce conf: {}", e))?;
+                }
+                // Older images without the alternate config keep the default.
+                Err(_) => {}
+            }
+            if !soys.is_empty() {
+                let mut cur = Vec::new();
+                extlinux
+                    .open_file("extlinux.conf")
+                    .and_then(|mut f| f.read_to_end(&mut cur).map(|_| ()))
+                    .map_err(|e| format!("err:image_patch reading extlinux.conf: {}", e))?;
+                let mut bak = extlinux
+                    .create_file("extlinux.conf.bak")
+                    .map_err(|e| format!("err:image_patch creating conf backup: {}", e))?;
+                bak.truncate()
+                    .map_err(|e| format!("err:image_patch truncating conf backup: {}", e))?;
+                bak.write_all(&cur)
+                    .map_err(|e| format!("err:image_patch writing conf backup: {}", e))?;
+                drop(bak);
+                let mut conf = extlinux
+                    .open_file("extlinux.conf")
+                    .map_err(|e| format!("err:image_patch opening extlinux.conf: {}", e))?;
+                conf.truncate()
+                    .map_err(|e| format!("err:image_patch truncating extlinux.conf: {}", e))?;
+                conf.write_all(&soys)
+                    .map_err(|e| format!("err:image_patch writing extlinux.conf: {}", e))?;
+                drop(conf);
+            }
         }
     }
+    fs.unmount()
+        .map_err(|e| format!("err:image_patch unmounting FAT: {}", e))?;
     Ok(())
 }

@@ -20,7 +20,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
 use crate::flash::{emit_progress, validate_device, check_temp_space, poll_flash_progress, decompress_xz, decompress_gz};
-use crate::rawwrite_unix::{receive_fd_from_helper, write_image_to_raw_fd, configure_boot_volume, FdHelperError};
+use crate::rawwrite_unix::{receive_fd_from_helper, write_image_to_raw_fd, patch_boot_partition, FdHelperError};
 use crate::diaglog::DiagLog;
 
 #[cfg(target_os = "macos")]
@@ -64,19 +64,39 @@ fn flash_core(
         check_temp_space(image_path)?;
     }
 
-    // Step 1: decompress in user space (with progress)
-    let img_to_flash = if needs_decompress {
+    // Step 1: materialize a private working copy of the image. macOS
+    // cannot mount the ArchR boot FAT (below-spec FAT32 the vendor
+    // U-Boots require), so the panel overlay and variant marker are
+    // patched into the image itself before writing; the user's original
+    // file is never modified.
+    let temp_img = std::env::temp_dir().join("archr-flash-temp.img");
+    if needs_decompress {
         emit_progress(app, 0.0, "decompressing");
-        let temp_img = std::env::temp_dir().join("archr-flash-temp.img");
         if is_xz {
             decompress_xz(app, image_path, &temp_img)?;
         } else {
             decompress_gz(app, image_path, &temp_img)?;
         }
-        temp_img
     } else {
-        PathBuf::from(image_path)
-    };
+        diag.push_str("raw image given, copying to temp for the boot patch\n");
+        check_temp_space(image_path)?;
+        fs::copy(image_path, &temp_img)
+            .map_err(|e| format!("err:image_patch copying image to temp: {}", e))?;
+    }
+    let img_to_flash = temp_img;
+
+    // Step 1b: install the overlay, variant and extlinux switch inside
+    // the image. The later verify pass then covers these bytes too.
+    diag.push_str(&format!(
+        "patching boot partition (dtbo: {}, variant: {})\n",
+        custom_dtbo_path, variant
+    ));
+    patch_boot_partition(&img_to_flash, Path::new(custom_dtbo_path), variant)
+        .map_err(|e| {
+            diag.push_str(&format!("boot patch failed: {}\n", e));
+            e
+        })?;
+    diag.push_str("boot partition patched\n");
 
     let image_size = fs::metadata(&img_to_flash).map(|m| m.len()).unwrap_or(0);
 
@@ -167,34 +187,13 @@ fn flash_core(
     stop.store(true, Ordering::Relaxed);
     let _ = poll_handle.join();
     let _ = fs::remove_file(&progress_file);
-    if needs_decompress {
-        let _ = fs::remove_file(&img_to_flash);
-    }
+    let _ = fs::remove_file(&img_to_flash);
 
     write_result?;
     verify_result?;
 
-    // Step 6: remount and configure the boot partition as the plain user.
-    emit_progress(app, 92.0, "configuring");
-    let boot_vol = match mount_boot_volume(device, diag) {
-        Some(v) => v,
-        None => {
-            let _ = Command::new("diskutil").args(["eject", device]).status();
-            return Err(format!(
-                "err:mount_boot could not mount {}s1 after flashing (image was written)",
-                device
-            ));
-        }
-    };
-    diag.push_str(&format!("boot volume: {}\n", boot_vol.display()));
-
-    let cfg = configure_boot_volume(&boot_vol, Path::new(custom_dtbo_path), variant);
-    if let Err(e) = &cfg {
-        diag.push_str(&format!("configure failed: {}\n", e));
-        let _ = Command::new("diskutil").args(["eject", device]).status();
-    }
-    cfg?;
-
+    // The boot partition was configured inside the image before the
+    // write, so nothing needs the quirky FAT mounted here. Just eject.
     emit_progress(app, 95.0, "syncing");
     let _ = Command::new("sync").status();
     let _ = Command::new("diskutil").args(["eject", device]).status();
@@ -222,34 +221,3 @@ fn diskutil_device_bytes(device: &str) -> Option<u64> {
     None
 }
 
-/// Remount the freshly written disk and resolve the boot (s1) mount point.
-/// mountDisk mounts every volume; the explicit s1 mount covers the case
-/// where diskutil skips the boot FAT on the first pass.
-#[cfg(target_os = "macos")]
-fn mount_boot_volume(device: &str, diag: &mut DiagLog) -> Option<PathBuf> {
-    use std::process::Command;
-    let part = format!("{}s1", device);
-    for attempt in 1..=5 {
-        thread::sleep(Duration::from_secs(2));
-        let _ = Command::new("diskutil").args(["mountDisk", device]).output();
-        let _ = Command::new("diskutil").args(["mount", &part]).output();
-        thread::sleep(Duration::from_secs(1));
-        if let Ok(out) = Command::new("diskutil").args(["info", &part]).output() {
-            let text = String::from_utf8_lossy(&out.stdout).to_string();
-            for line in text.lines() {
-                if line.contains("Mount Point:") {
-                    if let Some(mp) = line.splitn(2, ':').nth(1) {
-                        let mp = mp.trim();
-                        if !mp.is_empty() && Path::new(mp).is_dir() {
-                            return Some(PathBuf::from(mp));
-                        }
-                    }
-                }
-            }
-            if attempt == 5 {
-                diag.push_str(&format!("diskutil info {}:\n{}\n", part, text));
-            }
-        }
-    }
-    None
-}

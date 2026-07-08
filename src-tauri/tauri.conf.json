@@ -14,9 +14,9 @@
       {
         "title": "Arch R Flasher",
         "width": 680,
-        "height": 480,
-        "minWidth": 600,
-        "minHeight": 400,
+        "height": 500,
+        "minWidth": 680,
+        "minHeight": 490,
         "resizable": true,
         "center": true
       }
