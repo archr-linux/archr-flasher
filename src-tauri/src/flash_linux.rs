@@ -144,19 +144,29 @@ fn flash_core_linux(
 
     // Under an AppImage, current_exe() points inside the user's FUSE
     // mount (/tmp/.mount_*), which root cannot read: FUSE denies other
-    // users by default, root included. The pkexec'd script then failed
-    // to exec the helper and the flash died immediately with a generic
-    // error, while the .deb/.rpm installs (exe in /usr/bin) worked.
-    // Stage a root-readable copy of the exe outside the mount.
-    let helper_path = if std::env::var_os("APPIMAGE").is_some() {
-        let staged = std::env::temp_dir().join("archr-flash-helper");
-        fs::copy(&helper_path, &staged)
-            .map_err(|e| format!("Cannot stage helper for pkexec: {}", e))?;
-        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("Cannot set helper permissions: {}", e))?;
-        staged
-    } else {
-        helper_path
+    // users by default, root included. The 1.3.6 workaround staged a
+    // copy of the exe in /tmp, but the exe links webkit2gtk and friends
+    // that only exist inside the AppDir - outside AppRun there is no
+    // LD_LIBRARY_PATH and the helper died in the dynamic linker with
+    // exit 127 before reaching __flash-write (#13). Use the .AppImage
+    // file itself as the helper instead: root can read the *file* (the
+    // FUSE denial applies to the mount, not the image), the runtime
+    // brings its own libraries, and main() dispatches __flash-write
+    // before any GUI code runs. The script exports
+    // APPIMAGE_EXTRACT_AND_RUN=1 so the runtime self-extracts rather
+    // than FUSE-mounting under pkexec.
+    let helper_path = match std::env::var_os("APPIMAGE") {
+        Some(appimage) => {
+            let appimage = std::path::PathBuf::from(appimage);
+            if !appimage.is_file() {
+                return Err(format!(
+                    "APPIMAGE points to a missing file: {}",
+                    appimage.display()
+                ));
+            }
+            appimage
+        }
+        None => helper_path,
     };
 
     let child = cmd
@@ -195,9 +205,9 @@ fn flash_core_linux(
     // (5 GB) until reboot. needs_decompress covers both branches.
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(&progress_file);
-    if std::env::var_os("APPIMAGE").is_some() {
-        let _ = fs::remove_file(std::env::temp_dir().join("archr-flash-helper"));
-    }
+    // Older builds staged a copy of the exe as /tmp/archr-flash-helper;
+    // remove any leftover from a previous version.
+    let _ = fs::remove_file(std::env::temp_dir().join("archr-flash-helper"));
     if needs_decompress {
         let _ = fs::remove_file(&img_to_flash);
     }
@@ -419,6 +429,11 @@ HELPER_ARGS=()
 if [ "$VERIFY" = "0" ]; then
     HELPER_ARGS+=("--no-verify")
 fi
+# When HELPER is the .AppImage itself, make its runtime self-extract
+# instead of FUSE-mounting: pkexec runs us as root with a sanitized
+# environment and FUSE may be unavailable or denied there. Harmless
+# for a plain binary helper (.deb/.rpm installs), which ignores it.
+export APPIMAGE_EXTRACT_AND_RUN=1
 "$HELPER" __flash-write "${HELPER_ARGS[@]}" "$IMAGE" "$DEVICE" "$PROGRESS_FILE"
 HELPER_RC=$?
 
