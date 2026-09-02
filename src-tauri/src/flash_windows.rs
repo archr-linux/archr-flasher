@@ -705,11 +705,20 @@ fn flash_core_windows(
     emit_progress(app, 95.0, "syncing");
 
     let script_path = temp.join("archr-flash-config.ps1");
-    let script_content = generate_windows_config_script(device, custom_dtbo_path, variant);
+    let script_content = generate_windows_config_script();
     fs::write(&script_path, &script_content)
         .map_err(|e| format!("Cannot write config script: {}", e))?;
 
+    // Device/DTBO/variant travel as environment variables, not script
+    // literals: Windows PowerShell 5.1 reads a BOM-less .ps1 in the ANSI
+    // code page, so non-ASCII paths (e.g. Chinese folder names) turned
+    // into mojibake and Test-Path failed (#12). The environment block is
+    // UTF-16 end to end, immune to code pages, and keeping the script
+    // pure ASCII also removes the quote-escaping surface.
     let output = Command::new("powershell")
+        .env("ARCHR_DEVICE", device)
+        .env("ARCHR_DTBO", custom_dtbo_path)
+        .env("ARCHR_VARIANT", variant)
         .args([
             "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", script_path.to_str().unwrap_or(""),
@@ -748,18 +757,18 @@ fn flash_core_windows(
 /// - Write the `variant` file
 /// - Switch extlinux.conf for the soysauce variant
 #[cfg(target_os = "windows")]
-fn generate_windows_config_script(
-    device: &str,
-    custom_dtbo_path: &str,
-    variant: &str,
-) -> String {
-    let esc = |s: &str| s.replace('\'', "''");
+fn generate_windows_config_script() -> String {
+    // Pure-ASCII script; all variable input arrives via the environment
+    // (see the caller). UTF-8 console output so stderr survives
+    // from_utf8_lossy in the crash reporter instead of arriving in the
+    // OEM code page.
     format!(
         r#"$ErrorActionPreference = "Stop"
 try {{
-    $Device = '{device}'
-    $CustomDTBO = '{custom_dtbo}'
-    $Variant = '{variant}'
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $Device = $env:ARCHR_DEVICE
+    $CustomDTBO = $env:ARCHR_DTBO
+    $Variant = $env:ARCHR_VARIANT
 
     $diskNum = [int]([regex]::Match($Device, '\d+$').Value)
 
@@ -814,9 +823,6 @@ try {{
     Write-Error $_.Exception.Message
     exit 1
 }}
-"#,
-        device = esc(device),
-        custom_dtbo = esc(custom_dtbo_path),
-        variant = esc(variant),
+"#
     )
 }
