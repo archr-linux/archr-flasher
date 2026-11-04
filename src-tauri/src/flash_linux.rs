@@ -15,7 +15,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
-use crate::flash::{emit_progress, validate_device, check_temp_space, poll_flash_progress, decompress_xz, decompress_gz};
+use crate::flash::{emit_progress, validate_device, poll_flash_progress};
 use crate::diaglog::DiagLog;
 
 // ---------------------------------------------------------------------------
@@ -24,7 +24,7 @@ use crate::diaglog::DiagLog;
 #[cfg(target_os = "linux")]
 pub fn flash_image_privileged(
     app: &AppHandle,
-    image_path: &str,
+    image: crate::preflight::PreparedImage,
     device: &str,
     custom_dtbo_path: &str,
     variant: &str,
@@ -32,7 +32,7 @@ pub fn flash_image_privileged(
 ) -> Result<(), String> {
     let mut diag = DiagLog::new();
     let result = flash_core_linux(
-        app, image_path, device, custom_dtbo_path, variant, verify, &mut diag,
+        app, image, device, custom_dtbo_path, variant, verify, &mut diag,
     );
     match &result {
         Ok(()) => diag.push_str("result: success\n"),
@@ -44,7 +44,7 @@ pub fn flash_image_privileged(
 #[cfg(target_os = "linux")]
 fn flash_core_linux(
     app: &AppHandle,
-    image_path: &str,
+    image: crate::preflight::PreparedImage,
     device: &str,
     custom_dtbo_path: &str,
     variant: &str,
@@ -54,43 +54,17 @@ fn flash_core_linux(
     use std::process::{Command, Stdio};
     use std::os::unix::fs::PermissionsExt;
 
-    let custom_dtbo_path = custom_dtbo_path.trim();
-    crate::preflight::validate_flash_inputs(image_path, custom_dtbo_path)?;
-    let staged_overlay = crate::preflight::stage_overlay(custom_dtbo_path)?;
-    let custom_dtbo_path = staged_overlay.as_ref()
-        .map(|file| file.path().to_str().ok_or("Overlay staging path is not UTF-8"))
-        .transpose()?.unwrap_or("");
+    let image_path = image.path.to_string_lossy().into_owned();
     validate_device(device)?;
     diag.push_str(&format!(
         "device: {}\nimage: {}\nverify: {}\n", device, image_path, verify
     ));
 
-    let is_xz = image_path.ends_with(".xz");
-    let is_gz = image_path.ends_with(".gz") && !is_xz;
-    let needs_decompress = is_xz || is_gz;
-
-    // Check temp space before decompression
-    if needs_decompress {
-        check_temp_space(image_path)?;
-    }
-
-    // Step 1: Decompress in user space (with progress)
-    let img_to_flash = if needs_decompress {
-        emit_progress(app, 0.0, "decompressing");
-        let temp_img = std::env::temp_dir().join("archr-flash-temp.img");
-        if is_xz {
-            decompress_xz(app, image_path, &temp_img)?;
-        } else {
-            decompress_gz(app, image_path, &temp_img)?;
-        }
-        temp_img
-    } else {
-        PathBuf::from(image_path)
-    };
-
-    // Get decompressed image size for progress tracking
-    let image_size = fs::metadata(&img_to_flash)
-        .map(|m| m.len()).unwrap_or(0);
+    // The GUI materialized and validated any archive in a private file.
+    // The privileged helper reopens it once at the process boundary, validates
+    // that descriptor and target capacity, then keeps it through the write.
+    let img_to_flash = &image.path;
+    let image_size = image.size;
 
     // Step 2: Write helper script to temp file
     let script_path = std::env::temp_dir().join("archr-flash.sh");
@@ -205,18 +179,13 @@ fn flash_core_linux(
     stop.store(true, Ordering::Relaxed);
     let _ = poll_handle.join();
 
-    // Cleanup temp files. The decompressed .img is removed regardless
-    // of the source format. Previously only is_xz triggered the cleanup
-    // and gz-derived .img files stayed at /tmp/archr-flash-temp.img
-    // (5 GB) until reboot. needs_decompress covers both branches.
+    // Cleanup temp files. A decompressed image is owned by PreparedImage
+    // and removed when it drops, on success and on every error path.
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(&progress_file);
     // Older builds staged a copy of the exe as /tmp/archr-flash-helper;
     // remove any leftover from a previous version.
     let _ = fs::remove_file(std::env::temp_dir().join("archr-flash-helper"));
-    if needs_decompress {
-        let _ = fs::remove_file(&img_to_flash);
-    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -50,6 +50,7 @@ const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
 const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
 const FSCTL_ALLOW_EXTENDED_DASD_IO: u32 = 0x0009_0083;
 const IOCTL_DISK_UPDATE_PROPERTIES: u32 = 0x0007_0140;
+const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405c;
 const IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D_1080;
 
 // A subset of Win32 error codes we translate into actionable messages.
@@ -345,15 +346,29 @@ fn classify_write_error(err: u32) -> String {
 /// Full raw write: unmount → clean → write → verify → rescan.
 pub fn write_image(
     device: &str,
-    image_path: &str,
+    image: &mut crate::preflight::PreparedImage,
     progress_path: &str,
     verify: bool,
     diag: &mut DiagLog,
 ) -> Result<(), String> {
     let disk = extract_disk_number(device)?;
-    let image_size = std::fs::metadata(image_path)
-        .map_err(|e| format!("cannot stat image: {}", e))?
-        .len();
+    let image_size = crate::preflight::validate_image_file(&mut image.file)?;
+    let image_path = image.path.to_string_lossy();
+    let query = open_handle(device, GENERIC_READ, 0)
+        .map_err(|e| classify_open_error(e, device))?;
+    let mut capacity = 0i64;
+    let mut returned = 0u32;
+    // GET_LENGTH_INFO is read-only and runs before dismounting or any raw write.
+    let queried = unsafe {
+        DeviceIoControl(query.0, IOCTL_DISK_GET_LENGTH_INFO, std::ptr::null_mut(), 0,
+            &mut capacity as *mut i64 as *mut c_void, std::mem::size_of::<i64>() as u32,
+            &mut returned, std::ptr::null_mut())
+    };
+    if queried == 0 || returned < 8 || capacity <= 0 {
+        return Err("Cannot determine target capacity; refusing to write".into());
+    }
+    crate::preflight::validate_capacity(image_size, Some(capacity as u64), SECTOR)?;
+    drop(query);
 
     eprintln!("=== archr flash (windows native) ===");
     eprintln!("  device = {} (disk {})", device, disk);
@@ -376,7 +391,7 @@ pub fn write_image(
     let volume_locks = lock_and_dismount_volumes(disk, diag);
 
     write_progress(progress_path, "STAGE:writing");
-    let write_hash = match write_pass(device, image_path, image_size, progress_path) {
+    let write_hash = match write_pass(device, &mut image.file, image_size, progress_path) {
         Ok(h) => {
             diag.push_str(&format!("write pass done, sha256 {}\n", h));
             h
@@ -418,11 +433,10 @@ pub fn write_image(
 
 fn write_pass(
     device: &str,
-    image_path: &str,
+    image: &mut File,
     image_size: u64,
     progress_path: &str,
 ) -> Result<String, String> {
-    let mut image = File::open(image_path).map_err(|e| format!("cannot open image: {}", e))?;
     let dev = open_handle(
         device,
         GENERIC_READ | GENERIC_WRITE,
@@ -449,19 +463,9 @@ fn write_pass(
         if to_read == 0 {
             break;
         }
-        let mut filled = 0;
-        while filled < to_read {
-            let n = image
-                .read(&mut buf[filled..to_read])
-                .map_err(|e| format!("image read at {}: {}", written + filled as u64, e))?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-        if filled == 0 {
-            break;
-        }
+        image.read_exact(&mut buf[..to_read])
+            .map_err(|e| format!("image read at {}: {}", written, e))?;
+        let filled = to_read;
 
         // Hash the real image bytes (before zero-padding the tail).
         hasher.update(&buf[..filled]);
@@ -571,7 +575,7 @@ fn verify_pass(device: &str, image_size: u64, progress_path: &str) -> Result<Str
 // write_image above, then a small PowerShell step for the post-write config.
 // ---------------------------------------------------------------------------
 #[allow(unused_imports)]
-use crate::flash::{emit_progress, validate_device, check_temp_space, poll_flash_progress, decompress_xz, decompress_gz};
+use crate::flash::{emit_progress, validate_device, poll_flash_progress};
 #[allow(unused_imports)]
 use crate::diaglog::DiagLog;
 #[allow(unused_imports)]
@@ -591,7 +595,7 @@ use tauri::AppHandle;
 #[cfg(target_os = "windows")]
 pub fn flash_image_privileged(
     app: &AppHandle,
-    image_path: &str,
+    image: crate::preflight::PreparedImage,
     device: &str,
     custom_dtbo_path: &str,
     variant: &str,
@@ -604,7 +608,7 @@ pub fn flash_image_privileged(
 
     let mut diag = DiagLog::new();
     let result = flash_core_windows(
-        app, image_path, device, custom_dtbo_path, variant, verify, &mut diag,
+        app, image, device, custom_dtbo_path, variant, verify, &mut diag,
     );
     match &result {
         Ok(()) => diag.push_str("result: success\n"),
@@ -616,7 +620,7 @@ pub fn flash_image_privileged(
 #[cfg(target_os = "windows")]
 fn flash_core_windows(
     app: &AppHandle,
-    image_path: &str,
+    mut image: crate::preflight::PreparedImage,
     device: &str,
     custom_dtbo_path: &str,
     variant: &str,
@@ -628,44 +632,13 @@ fn flash_core_windows(
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    let custom_dtbo_path = custom_dtbo_path.trim();
-    crate::preflight::validate_flash_inputs(image_path, custom_dtbo_path)?;
-    let staged_overlay = crate::preflight::stage_overlay(custom_dtbo_path)?;
-    let custom_dtbo_path = staged_overlay.as_ref()
-        .map(|file| file.path().to_str().ok_or("Overlay staging path is not UTF-8"))
-        .transpose()?.unwrap_or("");
+    let image_path = image.path.to_string_lossy().into_owned();
     validate_device(device)?;
     diag.push_str(&format!(
         "device: {}\nimage: {}\nverify: {}\n", device, image_path, verify
     ));
 
-    let is_xz = image_path.ends_with(".xz");
-    let is_gz = image_path.ends_with(".gz") && !is_xz;
-    let needs_decompress = is_xz || is_gz;
-
-    if needs_decompress {
-        check_temp_space(image_path)?;
-    }
-
-    // Step 1: Decompress .xz or .gz in user space (with progress). The
-    // PowerShell writer streams the file to the device raw, so a gzipped
-    // image (the format ArchR ships) must be expanded here first, exactly
-    // like the Linux and macOS paths do.
-    let img_to_flash = if needs_decompress {
-        emit_progress(app, 0.0, "decompressing");
-        let temp_img = std::env::temp_dir().join("archr-flash-temp.img");
-        if is_xz {
-            decompress_xz(app, image_path, &temp_img)?;
-        } else {
-            decompress_gz(app, image_path, &temp_img)?;
-        }
-        temp_img
-    } else {
-        PathBuf::from(image_path)
-    };
-
-    let image_size = fs::metadata(&img_to_flash)
-        .map(|m| m.len()).unwrap_or(0);
+    let image_size = image.size;
 
     // Step 2: Raw write via the native writer (ported from rpi-imager). The
     // app is already elevated (admin.manifest), so this runs in-process with
@@ -687,7 +660,7 @@ fn flash_core_windows(
 
     let write_result = crate::flash_windows::write_image(
         device,
-        &img_to_flash.to_string_lossy(),
+        &mut image,
         &progress_file.to_string_lossy(),
         verify,
         diag,
@@ -696,9 +669,6 @@ fn flash_core_windows(
     stop.store(true, Ordering::Relaxed);
     let _ = poll_handle.join();
 
-    if needs_decompress {
-        let _ = fs::remove_file(&img_to_flash);
-    }
     if let Err(e) = write_result {
         let _ = fs::remove_file(&progress_file);
         return Err(e);

@@ -2,176 +2,201 @@
 // Copyright (C) 2026 ArchR
 
 use std::fs::File;
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
-/// Check every selected source before decompression, elevation or device I/O.
-/// An empty overlay means keep the panel configuration shipped in the image.
-/// Keep this shared by all OS entry points, not only the Tauri command.
-pub(crate) fn validate_flash_inputs(image: &str, overlay: &str) -> Result<(), String> {
-    readable_file(Path::new(image), "Image")?;
+const SECTOR: u64 = 512;
+// A structural lower bound, not a release-specific image size. Real ArchR
+// images are several GiB. Small synthetic images remain useful in tests.
+const MIN_IMAGE_SIZE: u64 = 16 * 1024 * 1024;
+
+pub(crate) struct FlashInputs {
+    pub image: File,
+    pub overlay: Option<File>,
+}
+
+/// Own the descriptor validated by preflight until write and verify finish.
+/// Replacing the pathname cannot substitute another file after validation.
+pub(crate) struct PreparedImage {
+    pub file: File,
+    pub path: PathBuf,
+    pub size: u64,
+    _temporary: Option<tempfile::TempPath>,
+}
+
+impl PreparedImage {
+    pub fn from_file(mut file: File, path: PathBuf) -> Result<Self, String> {
+        let size = validate_image_file(&mut file)?;
+        Ok(Self { file, path, size, _temporary: None })
+    }
+
+    pub fn open(path: &Path) -> Result<Self, String> {
+        Self::from_file(open_regular(path, "Image")?, path.to_path_buf())
+    }
+
+    pub fn from_temp(temp: tempfile::NamedTempFile) -> Result<Self, String> {
+        let (file, temporary) = temp.into_parts();
+        let mut image = Self::from_file(file, temporary.to_path_buf())?;
+        image._temporary = Some(temporary);
+        Ok(image)
+    }
+}
+
+/// Open selected sources once. Staging consumes this exact overlay descriptor.
+/// Compressed input is checked structurally after decoding and CRC validation.
+pub(crate) fn validate_flash_inputs(image: &str, overlay: &str) -> Result<FlashInputs, String> {
+    let mut source = open_regular(Path::new(image), "Image")?;
+    if image.ends_with(".gz") || image.ends_with(".xz") {
+        if source.metadata().map_err(|e| e.to_string())?.len() == 0 {
+            return Err("Image file is empty".into());
+        }
+    } else {
+        validate_image_file(&mut source)?;
+    }
     let overlay = overlay.trim();
-    if !overlay.is_empty() {
+    let overlay = if overlay.is_empty() {
+        None
+    } else {
         let path = Path::new(overlay);
         if !path.is_absolute() {
             return Err(format!("Overlay path must be absolute: {}", overlay));
         }
-        readable_file(path, "Overlay")?;
-    }
-    Ok(())
+        Some(open_regular(path, "Overlay")?)
+    };
+    Ok(FlashInputs { image: source, overlay })
 }
 
-/// Hold a private snapshot until post-write configuration has finished.
-/// Removing or editing the selected file during a long flash cannot turn
-/// a successful write into a late "overlay missing" error.
-pub(crate) fn stage_overlay(overlay: &str) -> Result<Option<tempfile::NamedTempFile>, String> {
-    let overlay = overlay.trim();
-    if overlay.is_empty() {
-        return Ok(None);
-    }
-    let mut source =
-        File::open(overlay).map_err(|e| format!("Cannot open selected overlay: {}", e))?;
-    let mut staged =
-        tempfile::NamedTempFile::new().map_err(|e| format!("Cannot stage overlay: {}", e))?;
-    std::io::copy(&mut source, staged.as_file_mut())
-        .map_err(|e| format!("Cannot stage overlay: {}", e))?;
+pub(crate) fn stage_overlay(source: Option<File>) -> Result<Option<tempfile::NamedTempFile>, String> {
+    let Some(mut source) = source else { return Ok(None); };
+    let mut staged = tempfile::NamedTempFile::new().map_err(|e| format!("Cannot stage overlay: {}", e))?;
+    std::io::copy(&mut source, staged.as_file_mut()).map_err(|e| format!("Cannot stage overlay: {}", e))?;
     Ok(Some(staged))
 }
 
-fn readable_file(path: &Path, label: &str) -> Result<(), String> {
-    // Reject directories and special files before open (opening a FIFO could block).
+fn open_regular(path: &Path, label: &str) -> Result<File, String> {
     if !path.is_file() {
-        return Err(format!(
-            "{} path is not a regular file: {}",
-            label,
-            path.display()
-        ));
+        return Err(format!("{} path is not a regular file: {}", label, path.display()));
     }
-    let file = File::open(path).map_err(|e| {
-        format!(
-            "{} file cannot be opened at {}: {}",
-            label,
-            path.display(),
-            e
-        )
-    })?;
-    let metadata = file
-        .metadata()
-        .map_err(|e| format!("Cannot read {} metadata: {}", label, e))?;
-    if !metadata.is_file() {
-        return Err(format!(
-            "{} path is not a regular file: {}",
-            label,
-            path.display()
-        ));
+    let file = File::open(path).map_err(|e| format!("{} file cannot be opened at {}: {}", label, path.display(), e))?;
+    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err(format!("{} descriptor is not a regular file", label));
     }
-    if label == "Image" && metadata.len() == 0 {
-        return Err("Image file is empty".into());
+    Ok(file)
+}
+
+/// Validate the MBR layouts generated by distribution/scripts/mkimage:
+/// current boot FAT32 + root (0x83/hidden 0xDA) + storage ext4, or legacy
+/// boot FAT32 + storage ext4. Bounds must fit the file, never overlap and
+/// be sector aligned. This checks structure, not image authenticity.
+pub(crate) fn validate_image_file(file: &mut File) -> Result<u64, String> {
+    let metadata = file.metadata().map_err(|e| format!("Cannot stat image: {}", e))?;
+    let size = metadata.len();
+    if !metadata.is_file() || size < MIN_IMAGE_SIZE || !size.is_multiple_of(SECTOR) {
+        return Err("Invalid image: expected a regular, sector-aligned disk image of at least 16 MiB".into());
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| format!("Cannot seek image: {}", e))?;
+    let mut mbr = [0u8; 512];
+    file.read_exact(&mut mbr).map_err(|e| format!("Cannot read image MBR: {}", e))?;
+    if mbr[510..512] != [0x55, 0xaa] {
+        return Err("Invalid image: missing MBR signature".into());
+    }
+    let mut types = Vec::new();
+    let mut previous_end = 2048u64; // at least 1 MiB reserved for bootloader
+    let mut saw_empty = false;
+    for entry in mbr[446..510].chunks_exact(16) {
+        let kind = entry[4];
+        let start = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as u64;
+        let sectors = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as u64;
+        if kind == 0 && start == 0 && sectors == 0 {
+            saw_empty = true;
+            continue;
+        }
+        if saw_empty || !matches!(entry[0], 0 | 0x80) || sectors < 2048 || start < previous_end || start + sectors > size / SECTOR {
+            return Err("Invalid image: empty, overlapping or out-of-bounds MBR partition".into());
+        }
+        previous_end = start + sectors;
+        types.push(kind);
+    }
+    let expected = matches!(types.as_slice(), [0x0b | 0x0c, 0x83] | [0x0b | 0x0c, 0x83 | 0xda, 0x83]);
+    if !expected {
+        return Err("Invalid image: expected ArchR FAT32 boot and Linux root/storage partitions".into());
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| format!("Cannot rewind image: {}", e))?;
+    Ok(size)
+}
+
+pub(crate) fn validate_capacity(image_size: u64, device_size: Option<u64>, alignment: u64) -> Result<(), String> {
+    let size = device_size.ok_or("Cannot determine target capacity; refusing to write")?;
+    let needed = image_size.checked_add(alignment - 1).ok_or("Image size overflow")? / alignment * alignment;
+    if needed > size {
+        return Err(format!("Image does not fit target: need {} bytes, target has {}", needed, size));
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_flash_inputs;
+    use super::*;
     use std::fs;
 
-    #[test]
-    fn staged_overlay_survives_removal_of_the_selected_source() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("panel.dtbo");
-        fs::write(&source, b"selected overlay").unwrap();
-        let staged = super::stage_overlay(source.to_str().unwrap())
-            .unwrap()
-            .unwrap();
-        fs::remove_file(source).unwrap();
-        assert_eq!(fs::read(staged.path()).unwrap(), b"selected overlay");
-        let path = staged.path().to_path_buf();
-        drop(staged);
-        assert!(!path.exists());
-        assert!(super::stage_overlay("").unwrap().is_none());
+    fn image(dir: &Path) -> PathBuf {
+        let path = dir.join("image.img");
+        crate::test_support::valid_image(&path, 16 * 1024 * 1024);
+        path
     }
 
     #[test]
-    fn missing_overlay_cannot_be_staged() {
+    fn accepts_image_without_overlay() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(super::stage_overlay(dir.path().join("missing.dtbo").to_str().unwrap()).is_err());
+        let image = image(dir.path());
+        assert!(validate_flash_inputs(image.to_str().unwrap(), "").is_ok());
+        assert!(validate_flash_inputs(image.to_str().unwrap(), " \t ").is_ok());
+    }
+
+    #[test]
+    fn staged_overlay_survives_removal_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = image(dir.path());
+        let overlay = dir.path().join("panel.dtbo");
+        fs::write(&overlay, b"selected overlay").unwrap();
+        let inputs = validate_flash_inputs(image.to_str().unwrap(), overlay.to_str().unwrap()).unwrap();
+        fs::remove_file(&overlay).unwrap();
+        fs::write(&overlay, b"replacement").unwrap();
+        let staged = stage_overlay(inputs.overlay).unwrap().unwrap();
+        assert_eq!(fs::read(staged.path()).unwrap(), b"selected overlay");
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(staged.path()).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let path = staged.path().to_path_buf();
+        drop(staged);
+        assert!(!path.exists());
+        assert!(stage_overlay(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn rejects_missing_sources_directories_relative_overlay_and_empty_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = image(dir.path());
+        assert!(validate_flash_inputs(dir.path().join("missing.img").to_str().unwrap(), "").is_err());
+        assert!(validate_flash_inputs(image.to_str().unwrap(), dir.path().join("missing.dtbo").to_str().unwrap()).is_err());
+        assert!(validate_flash_inputs(dir.path().to_str().unwrap(), "").is_err());
+        assert!(validate_flash_inputs(image.to_str().unwrap(), dir.path().to_str().unwrap()).is_err());
+        assert!(validate_flash_inputs(image.to_str().unwrap(), "relative.dtbo").is_err());
+        fs::write(&image, b"").unwrap();
+        assert!(validate_flash_inputs(image.to_str().unwrap(), "").is_err());
     }
 
     #[cfg(unix)]
     #[test]
     fn unreadable_selected_overlay_fails_before_writing() {
         use std::os::unix::fs::PermissionsExt;
-        // Root may read mode-000 files; this case applies to unprivileged GUI users.
-        if unsafe { libc::geteuid() } == 0 {
-            return;
-        }
+        if unsafe { libc::geteuid() } == 0 { return; }
         let dir = tempfile::tempdir().unwrap();
-        let image = dir.path().join("image.img");
+        let image = image(dir.path());
         let overlay = dir.path().join("panel.dtbo");
-        fs::write(&image, b"image").unwrap();
         fs::write(&overlay, b"overlay").unwrap();
         fs::set_permissions(&overlay, fs::Permissions::from_mode(0o000)).unwrap();
         assert!(validate_flash_inputs(image.to_str().unwrap(), overlay.to_str().unwrap()).is_err());
-        assert!(super::stage_overlay(overlay.to_str().unwrap()).is_err());
-    }
-
-    #[test]
-    fn accepts_image_without_overlay() {
-        let dir = tempfile::tempdir().unwrap();
-        let image = dir.path().join("image.img");
-        fs::write(&image, b"image").unwrap();
-        assert!(validate_flash_inputs(image.to_str().unwrap(), "").is_ok());
-        assert!(validate_flash_inputs(image.to_str().unwrap(), " \t ").is_ok());
-    }
-
-    #[test]
-    fn accepts_selected_readable_overlay() {
-        let dir = tempfile::tempdir().unwrap();
-        let image = dir.path().join("image.img");
-        let overlay = dir.path().join("panel.dtbo");
-        fs::write(&image, b"image").unwrap();
-        fs::write(&overlay, b"overlay").unwrap();
-        assert!(validate_flash_inputs(image.to_str().unwrap(), overlay.to_str().unwrap()).is_ok());
-    }
-
-    #[test]
-    fn missing_selected_overlay_fails_before_target_can_be_written() {
-        let dir = tempfile::tempdir().unwrap();
-        let image = dir.path().join("image.img");
-        let target = dir.path().join("target.img");
-        fs::write(&image, b"new image").unwrap();
-        fs::write(&target, b"untouched target").unwrap();
-        let write = || -> Result<(), String> {
-            validate_flash_inputs(
-                image.to_str().unwrap(),
-                dir.path().join("missing.dtbo").to_str().unwrap(),
-            )?;
-            fs::copy(&image, &target).map_err(|e| e.to_string())?;
-            Ok(())
-        };
-        assert!(write().unwrap_err().contains("Overlay"));
-        assert_eq!(fs::read(&target).unwrap(), b"untouched target");
-    }
-
-    #[test]
-    fn rejects_missing_image_even_without_overlay() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(
-            validate_flash_inputs(dir.path().join("missing.img").to_str().unwrap(), "").is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_directories_relative_overlay_and_empty_image() {
-        let dir = tempfile::tempdir().unwrap();
-        let image = dir.path().join("image.img");
-        fs::write(&image, b"image").unwrap();
-        assert!(validate_flash_inputs(dir.path().to_str().unwrap(), "").is_err());
-        assert!(
-            validate_flash_inputs(image.to_str().unwrap(), dir.path().to_str().unwrap()).is_err()
-        );
-        assert!(validate_flash_inputs(image.to_str().unwrap(), "relative.dtbo").is_err());
-        fs::write(&image, b"").unwrap();
-        assert!(validate_flash_inputs(image.to_str().unwrap(), "").is_err());
     }
 }

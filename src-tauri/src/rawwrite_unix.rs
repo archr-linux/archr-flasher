@@ -140,55 +140,47 @@ fn recv_fd(sock: RawFd) -> Option<RawFd> {
 /// of real image bytes written so far. Returns the image byte count.
 pub fn write_image_to_raw_fd(
     dev: &mut File,
-    image: &Path,
+    image: &mut crate::preflight::PreparedImage,
     device_size: Option<u64>,
     mut progress: impl FnMut(u64),
 ) -> Result<WriteOutcome, String> {
-    // Open the required source before even the signature wipe touches the target.
-    let mut src = File::open(image)
-        .map_err(|e| format!("Cannot open image: {}", e))?;
+    // Recheck the retained descriptor, never reopen the selected pathname.
+    let image_size = crate::preflight::validate_image_file(&mut image.file)?;
+    let capacity = device_size.or_else(|| dev.metadata().ok().filter(|m| m.is_file()).map(|m| m.len()));
+    crate::preflight::validate_capacity(image_size, capacity, SECTOR)?;
+    let mut buf = vec![0u8; CHUNK];
+    let first = image_size.min(CHUNK as u64) as usize;
+    // Read a complete first block before ANY signature wipe or target write.
+    image.file.read_exact(&mut buf[..first])
+        .map_err(|e| format!("Cannot read first image block: {}", e))?;
+
     let zeros = vec![0u8; MB as usize];
     dev.seek(SeekFrom::Start(0))
         .map_err(|e| format!("err:write_failed seek 0: {}", e))?;
     dev.write_all(&zeros)
         .map_err(|e| format!("err:write_failed wiping first MB: {}", e))?;
-    if let Some(size) = device_size
+    if let Some(size) = capacity
         && size > 2 * MB {
-            let last_mb = (size / MB - 1) * MB;
-            dev.seek(SeekFrom::Start(last_mb))
-                .map_err(|e| format!("err:write_failed seek last MB: {}", e))?;
-            dev.write_all(&zeros)
-                .map_err(|e| format!("err:write_failed wiping last MB: {}", e))?;
-        }
+        let last_mb = (size / MB - 1) * MB;
+        dev.seek(SeekFrom::Start(last_mb))
+            .map_err(|e| format!("err:write_failed seek last MB: {}", e))?;
+        dev.write_all(&zeros)
+            .map_err(|e| format!("err:write_failed wiping last MB: {}", e))?;
+    }
     dev.seek(SeekFrom::Start(0))
         .map_err(|e| format!("err:write_failed seek rewind: {}", e))?;
 
-    let mut buf = vec![0u8; CHUNK];
-    let mut done: u64 = 0;
-    loop {
-        // Fill the chunk fully so short reads from the fs cache don't
-        // translate into tiny unaligned device writes.
-        let mut filled = 0usize;
-        while filled < CHUNK {
-            let n = src.read(&mut buf[filled..])
-                .map_err(|e| format!("Image read at {}: {}", done + filled as u64, e))?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
+    let mut done = 0u64;
+    while done < image_size {
+        let filled = (image_size - done).min(CHUNK as u64) as usize;
+        if done > 0 {
+            image.file.read_exact(&mut buf[..filled])
+                .map_err(|e| format!("Image read at {}: {}", done, e))?;
         }
-        if filled == 0 {
-            break;
-        }
-        let aligned = ((filled as u64 + SECTOR - 1) & !(SECTOR - 1)) as usize;
-        buf[filled..aligned].fill(0);
-        dev.write_all(&buf[..aligned])
+        dev.write_all(&buf[..filled])
             .map_err(|e| format!("err:write_failed at byte {}: {}", done, e))?;
         done += filled as u64;
         progress(done);
-        if filled < CHUNK {
-            break;
-        }
     }
 
     // Raw character devices write unbuffered, and /dev/rdisk on macOS
@@ -212,14 +204,15 @@ pub struct WriteOutcome {
 /// image file, chunk by chunk. Reports progress as 0..100 percent.
 pub fn verify_image_on_raw_fd(
     dev: &mut File,
-    image: &Path,
+    image: &mut File,
     image_size: u64,
     mut progress: impl FnMut(u64),
 ) -> Result<(), String> {
     dev.seek(SeekFrom::Start(0))
         .map_err(|e| format!("verify_failed seek: {}", e))?;
-    let mut src = File::open(image)
-        .map_err(|e| format!("verify_failed open image: {}", e))?;
+    image.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("verify_failed seek image: {}", e))?;
+    let src = image;
     let mut img_buf = vec![0u8; CHUNK];
     let mut dev_buf = vec![0u8; CHUNK];
     let mut done: u64 = 0;
@@ -268,7 +261,7 @@ fn full_sync(f: &File) -> std::io::Result<()> {
 /// the OS is impossible there. Patching the image up front also means a
 /// subsequent verify pass covers the configuration bytes too. An empty
 /// `dtbo` path preserves the existing overlay, including its absence.
-pub fn patch_boot_partition(image: &Path, dtbo: &Path, variant: &str) -> Result<(), String> {
+pub fn patch_boot_partition(image: &mut File, dtbo: &Path, variant: &str) -> Result<(), String> {
     use std::io::Read;
 
     let dtbo_bytes = if dtbo.as_os_str().is_empty() {
@@ -281,11 +274,9 @@ pub fn patch_boot_partition(image: &Path, dtbo: &Path, variant: &str) -> Result<
         Some(bytes)
     };
 
-    let mut img = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(image)
-        .map_err(|e| format!("err:image_patch opening image: {}", e))?;
+    let img = image;
+    img.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("err:image_patch seeking image: {}", e))?;
 
     // First MBR partition entry: status byte at 446, type at 446+4,
     // start LBA (little endian u32) at 446+8, sector count at 446+12.

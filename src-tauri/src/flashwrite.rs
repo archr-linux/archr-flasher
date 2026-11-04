@@ -157,18 +157,10 @@ fn run(
     progress_path: &str,
     verify_enabled: bool,
 ) -> Result<(), String> {
-    // Sanity
-    if !Path::new(image_path).is_file() {
-        return Err(format!("source image not found: {}", image_path));
-    }
-    let metadata = std::fs::metadata(image_path)
-        .map_err(|e| format!("cannot stat image: {}", e))?;
-    let image_size = metadata.len();
-    eprintln!("  image_size = {} bytes ({:.2} GiB)",
-        image_size, image_size as f64 / (1024.0 * 1024.0 * 1024.0));
-
-    let mut image = File::open(image_path)
-        .map_err(|e| format!("cannot open image: {}", e))?;
+    // This process boundary has its own preflight. Open once and retain the
+    // validated descriptor instead of checking a path and reopening it later.
+    let mut image = crate::preflight::PreparedImage::open(Path::new(image_path))?;
+    let image_size = image.size;
 
     // Open the device O_DIRECT if possible. O_DIRECT bypasses the page
     // cache so writes go straight to the device; this is what makes the
@@ -198,6 +190,9 @@ fn run(
             .map_err(|e| format!("cannot open device: {}", e))?
     };
 
+    let capacity = target_capacity(&device)?;
+    crate::preflight::validate_capacity(image_size, Some(capacity), if direct { 4096 } else { 512 })?;
+
     write_progress(progress_path, "STAGE:writing");
 
     // 4 KiB aligned buffer is mandatory when the device fd was opened
@@ -222,15 +217,11 @@ fn run(
         let to_read = ((image_size - written).min(CHUNK_BYTES as u64)) as usize;
         if to_read == 0 { break; }
 
-        // Read from image. May return short read at EOF.
-        let mut filled = 0;
-        while filled < to_read {
-            let n = image.read(&mut buf[filled..to_read])
-                .map_err(|e| format!("image read at offset {}: {}", written + filled as u64, e))?;
-            if n == 0 { break; }
-            filled += n;
-        }
-        if filled == 0 { break; }
+        // EOF before the validated length is an error, never a successful
+        // partial flash whose verification merely covers the truncated prefix.
+        image.file.read_exact(&mut buf[..to_read])
+            .map_err(|e| format!("image read at offset {}: {}", written, e))?;
+        let filled = to_read;
 
         // Hash the REAL image bytes (not the zero-padded tail). The
         // verify pass below will hash the same byte range from the
@@ -309,6 +300,24 @@ fn run(
     eprintln!("  verify ok: {}", verify_hash);
     write_progress(progress_path, "STAGE:done");
     Ok(())
+}
+
+/// Query real block capacity (regular files are used only by regression tests).
+fn target_capacity(device: &File) -> Result<u64, String> {
+    use std::os::unix::fs::FileTypeExt;
+    let metadata = device.metadata().map_err(|e| format!("Cannot stat target: {}", e))?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.file_type().is_block_device() {
+        return Err("Target is not a block device or regular test file".into());
+    }
+    let mut size = 0u64;
+    // BLKGETSIZE64 writes an unsigned 64-bit capacity to the provided pointer.
+    if unsafe { libc::ioctl(device.as_raw_fd(), 0x8008_1272 as libc::c_ulong, &mut size) } != 0 {
+        return Err(format!("Cannot query target capacity: {}", std::io::Error::last_os_error()));
+    }
+    Ok(size)
 }
 
 /// Stream the device through SHA-256 and return the hash. No per-chunk

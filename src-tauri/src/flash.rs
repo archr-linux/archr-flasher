@@ -1,5 +1,4 @@
-use std::io::{BufReader, Read, Write};
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -85,27 +84,6 @@ pub(crate) fn validate_device(device: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Check available temp space before XZ decompression.
-/// XZ images decompress to ~3-4x their compressed size.
-pub(crate) fn check_temp_space(image_path: &str) -> Result<(), String> {
-    let src_size = fs::metadata(image_path)
-        .map_err(|e| format!("Cannot read image: {}", e))?.len();
-    let needed = src_size * 4;
-    let temp_dir = std::env::temp_dir();
-    let available = fs2::available_space(&temp_dir)
-        .map_err(|e| format!("Cannot check disk space: {}", e))?;
-
-    if available < needed {
-        let need_gb = needed as f64 / 1_000_000_000.0;
-        let have_gb = available as f64 / 1_000_000_000.0;
-        return Err(format!(
-            "Not enough temp space: need {:.1} GB, have {:.1} GB",
-            need_gb, have_gb
-        ));
-    }
-    Ok(())
-}
-
 /// Poll a progress file written by the flash script.
 /// Supports two formats:
 ///   - Raw number: bytes written → maps to writing progress (55%..90%)
@@ -172,70 +150,6 @@ pub(crate) fn poll_flash_progress(
             }
         }
     })
-}
-
-
-pub(crate) fn decompress_xz(app: &AppHandle, src: &str, dst: &Path) -> Result<(), String> {
-    let src_file = File::open(src)
-        .map_err(|e| format!("Cannot open image: {}", e))?;
-    let src_size = src_file.metadata()
-        .map_err(|e| format!("Metadata error: {}", e))?.len();
-    let estimated_total = src_size * 3; // rough estimate for decompressed size
-
-    let mut decoder = xz2::read::XzDecoder::new(BufReader::new(src_file));
-    let mut dst_file = File::create(dst)
-        .map_err(|e| format!("Cannot create temp file: {}", e))?;
-
-    let mut buf = vec![0u8; 4 * 1024 * 1024]; // 4MB buffer
-    let mut written: u64 = 0;
-
-    loop {
-        let n = decoder.read(&mut buf)
-            .map_err(|e| format!("Decompress error: {}", e))?;
-        if n == 0 { break; }
-
-        dst_file.write_all(&buf[..n])
-            .map_err(|e| format!("Write error: {}", e))?;
-        written += n as u64;
-
-        // 0-55% for decompression phase
-        let pct = (written as f64 / estimated_total as f64 * 55.0).min(55.0);
-        emit_progress(app, pct, "decompressing");
-    }
-
-    dst_file.flush().map_err(|e| format!("Flush error: {}", e))?;
-    Ok(())
-}
-
-pub(crate) fn decompress_gz(app: &AppHandle, src: &str, dst: &Path) -> Result<(), String> {
-    let src_file = File::open(src)
-        .map_err(|e| format!("Cannot open image: {}", e))?;
-    let src_size = src_file.metadata()
-        .map_err(|e| format!("Metadata error: {}", e))?.len();
-    let estimated_total = src_size * 3;
-
-    let mut decoder = flate2::read::GzDecoder::new(BufReader::new(src_file));
-    let mut dst_file = File::create(dst)
-        .map_err(|e| format!("Cannot create temp file: {}", e))?;
-
-    let mut buf = vec![0u8; 4 * 1024 * 1024];
-    let mut written: u64 = 0;
-
-    loop {
-        let n = decoder.read(&mut buf)
-            .map_err(|e| format!("Decompress error: {}", e))?;
-        if n == 0 { break; }
-
-        dst_file.write_all(&buf[..n])
-            .map_err(|e| format!("Write error: {}", e))?;
-        written += n as u64;
-
-        let pct = (written as f64 / estimated_total as f64 * 55.0).min(55.0);
-        emit_progress(app, pct, "decompressing");
-    }
-
-    dst_file.flush().map_err(|e| format!("Flush error: {}", e))?;
-    Ok(())
 }
 
 

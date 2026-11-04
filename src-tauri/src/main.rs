@@ -7,6 +7,9 @@ mod flash;
 mod github;
 mod overlay;
 mod preflight;
+mod image_cache;
+#[cfg(test)]
+mod test_support;
 #[cfg(all(test, unix))]
 mod flash_tests;
 // Privileged disk-write helper, run as the hidden `__flash-write`
@@ -158,74 +161,19 @@ async fn flash_image(
         .map_err(|e| format!("Cache dir error: {}", e))?;
 
     tokio::task::spawn_blocking(move || {
-        // Empty overlay is the skip sentinel on every platform. Validate
-        // the image too, even when a cached decompression already exists.
-        let trimmed_overlay = overlay_path.trim();
-        preflight::validate_flash_inputs(&image_path, trimmed_overlay)?;
-
-        // Decompress .xz/.gz into a cached temp image so flash_image_
-        // privileged can write it block-for-block. If the source archive
-        // is newer than the cached decompression we invalidate the
-        // cache before reusing it.
-        let is_compressed = image_path.ends_with(".xz") || image_path.ends_with(".gz");
-        let flash_image_path = if is_compressed {
-            let _ = std::fs::create_dir_all(&cache_dir);
-            let temp_img = cache_dir.join("archr-flash-temp.img");
-            if temp_img.exists() {
-                let stale = match (std::fs::metadata(&image_path), std::fs::metadata(&temp_img)) {
-                    (Ok(src), Ok(cached)) => match (src.modified(), cached.modified()) {
-                        (Ok(s), Ok(c)) => s > c,
-                        _ => false,
-                    },
-                    _ => false,
-                };
-                if stale { let _ = std::fs::remove_file(&temp_img); }
-            }
-            if !temp_img.exists() {
-                use std::io::{BufReader, Read, Write};
-                let src_file = std::fs::File::open(&image_path)
-                    .map_err(|e| format!("Cannot open image: {}", e))?;
-                let mut dst_file = std::fs::File::create(&temp_img)
-                    .map_err(|e| format!("Cannot create temp: {}", e))?;
-                let mut buf = vec![0u8; 4 * 1024 * 1024];
-                if image_path.ends_with(".xz") {
-                    let mut decoder = xz2::read::XzDecoder::new(BufReader::new(src_file));
-                    loop {
-                        let n = decoder.read(&mut buf)
-                            .map_err(|e| format!("Decompress error: {}", e))?;
-                        if n == 0 { break; }
-                        dst_file.write_all(&buf[..n])
-                            .map_err(|e| format!("Write error: {}", e))?;
-                    }
-                } else {
-                    let mut decoder = flate2::read::GzDecoder::new(BufReader::new(src_file));
-                    loop {
-                        let n = decoder.read(&mut buf)
-                            .map_err(|e| format!("Decompress error: {}", e))?;
-                        if n == 0 { break; }
-                        dst_file.write_all(&buf[..n])
-                            .map_err(|e| format!("Write error: {}", e))?;
-                    }
-                }
-                dst_file.flush().map_err(|e| format!("Flush: {}", e))?;
-            }
-            temp_img.to_string_lossy().to_string()
+        let inputs = preflight::validate_flash_inputs(&image_path, overlay_path.trim())?;
+        // Stage from the descriptor that was validated, not from its pathname.
+        let staged_overlay = preflight::stage_overlay(inputs.overlay)?;
+        let overlay = staged_overlay.as_ref()
+            .map(|file| file.path().to_str().ok_or("Overlay staging path is not UTF-8"))
+            .transpose()?.unwrap_or("");
+        let source_path = std::path::Path::new(&image_path);
+        let image = if image_path.ends_with(".gz") || image_path.ends_with(".xz") {
+            image_cache::prepare(inputs.image, source_path, &cache_dir)?
         } else {
-            image_path.clone()
+            preflight::PreparedImage::from_file(inputs.image, source_path.to_path_buf())?
         };
-
-        flash::flash_image_privileged(
-            &app_clone,
-            &flash_image_path,
-            &device,
-            trimmed_overlay,
-            &variant,
-            verify,
-        )?;
-
-        if is_compressed {
-            let _ = std::fs::remove_file(cache_dir.join("archr-flash-temp.img"));
-        }
+        flash::flash_image_privileged(&app_clone, image, &device, overlay, &variant, verify)?;
 
         Ok("Flash complete".into())
     })

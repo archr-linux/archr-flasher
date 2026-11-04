@@ -19,21 +19,21 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
-use crate::flash::{emit_progress, validate_device, check_temp_space, poll_flash_progress, decompress_xz, decompress_gz};
+use crate::flash::{emit_progress, validate_device, poll_flash_progress};
 use crate::rawwrite_unix::{receive_fd_from_helper, write_image_to_raw_fd, patch_boot_partition, FdHelperError};
 use crate::diaglog::DiagLog;
 
 #[cfg(target_os = "macos")]
 pub fn flash_image_privileged(
     app: &AppHandle,
-    image_path: &str,
+    image: crate::preflight::PreparedImage,
     device: &str,
     custom_dtbo_path: &str,
     variant: &str,
     verify: bool,
 ) -> Result<(), String> {
     let mut diag = DiagLog::new();
-    let result = flash_core(app, image_path, device, custom_dtbo_path, variant, verify, &mut diag);
+    let result = flash_core(app, image, device, custom_dtbo_path, variant, verify, &mut diag);
     match &result {
         Ok(()) => diag.push_str("result: success\n"),
         Err(e) => diag.push_str(&format!("result: {}\n", e)),
@@ -44,7 +44,7 @@ pub fn flash_image_privileged(
 #[cfg(target_os = "macos")]
 fn flash_core(
     app: &AppHandle,
-    image_path: &str,
+    mut image: crate::preflight::PreparedImage,
     device: &str,
     custom_dtbo_path: &str,
     variant: &str,
@@ -53,43 +53,16 @@ fn flash_core(
 ) -> Result<(), String> {
     use std::process::Command;
 
-    let custom_dtbo_path = custom_dtbo_path.trim();
-    crate::preflight::validate_flash_inputs(image_path, custom_dtbo_path)?;
-    let staged_overlay = crate::preflight::stage_overlay(custom_dtbo_path)?;
-    let custom_dtbo_path = staged_overlay.as_ref()
-        .map(|file| file.path().to_str().ok_or("Overlay staging path is not UTF-8"))
-        .transpose()?.unwrap_or("");
+    let image_path = image.path.to_string_lossy().into_owned();
     validate_device(device)?;
     diag.push_str(&format!("device: {}\nimage: {}\nverify: {}\n", device, image_path, verify));
 
-    let is_xz = image_path.ends_with(".xz");
-    let is_gz = image_path.ends_with(".gz") && !is_xz;
-    let needs_decompress = is_xz || is_gz;
-
-    if needs_decompress {
-        check_temp_space(image_path)?;
-    }
-
-    // Step 1: materialize a private working copy of the image. macOS
-    // cannot mount the ArchR boot FAT (below-spec FAT32 the vendor
-    // U-Boots require), so the panel overlay and variant marker are
-    // patched into the image itself before writing; the user's original
-    // file is never modified.
-    let temp_img = std::env::temp_dir().join("archr-flash-temp.img");
-    if needs_decompress {
-        emit_progress(app, 0.0, "decompressing");
-        if is_xz {
-            decompress_xz(app, image_path, &temp_img)?;
-        } else {
-            decompress_gz(app, image_path, &temp_img)?;
-        }
-    } else {
-        diag.push_str("raw image given, copying to temp for the boot patch\n");
-        check_temp_space(image_path)?;
-        fs::copy(image_path, &temp_img)
-            .map_err(|e| format!("err:image_patch copying image to temp: {}", e))?;
-    }
-    let img_to_flash = temp_img;
+    // macOS cannot mount the image's nonstandard FAT32. Patch a private
+    // working copy, never the selected source. Copy from its validated fd.
+    let mut working = tempfile::NamedTempFile::new()
+        .map_err(|e| format!("Cannot create private boot-patch image: {}", e))?;
+    std::io::copy(&mut image.file, working.as_file_mut())
+        .map_err(|e| format!("Cannot copy image for boot patch: {}", e))?;
 
     // Step 1b: install the overlay, variant and extlinux switch inside
     // the image. The later verify pass then covers these bytes too. This
@@ -100,18 +73,20 @@ fn flash_core(
         "patching boot partition (dtbo: {}, variant: {})\n",
         custom_dtbo_path, variant
     ));
-    patch_boot_partition(&img_to_flash, Path::new(custom_dtbo_path), variant)
+    patch_boot_partition(working.as_file_mut(), Path::new(custom_dtbo_path), variant)
         .map_err(|e| {
             diag.push_str(&format!("boot patch failed: {}\n", e));
             e
         })?;
     diag.push_str("boot partition patched\n");
 
-    let image_size = fs::metadata(&img_to_flash).map(|m| m.len()).unwrap_or(0);
+    let mut image = crate::preflight::PreparedImage::from_temp(working)?;
+    let image_size = image.size;
 
     // Step 2: device size for the last-MB signature wipe (best effort)
     let device_size = diskutil_device_bytes(device);
     diag.push_str(&format!("device bytes: {:?}\n", device_size));
+    crate::preflight::validate_capacity(image_size, device_size, 512)?;
 
     // Step 3: unmount everything on the disk (macOS auto-mounts SD cards)
     let unmount = Command::new("diskutil")
@@ -161,7 +136,7 @@ fn flash_core(
     );
 
     let mut dev = File::from(fd);
-    let write_result = write_image_to_raw_fd(&mut dev, &img_to_flash, device_size, |done| {
+    let write_result = write_image_to_raw_fd(&mut dev, &mut image, device_size, |done| {
         let _ = fs::write(&progress_file, done.to_string());
     });
 
@@ -179,7 +154,7 @@ fn flash_core(
     // raw device would need a second password prompt.
     let verify_result = if verify && write_result.is_ok() {
         diag.push_str("verifying against the image, read back over the same fd\n");
-        crate::rawwrite_unix::verify_image_on_raw_fd(&mut dev, &img_to_flash, image_size, |pct| {
+        crate::rawwrite_unix::verify_image_on_raw_fd(&mut dev, &mut image.file, image_size, |pct| {
             let _ = fs::write(&progress_file, format!("STAGE:verifying:{}", pct));
         })
     } else {
@@ -196,7 +171,6 @@ fn flash_core(
     stop.store(true, Ordering::Relaxed);
     let _ = poll_handle.join();
     let _ = fs::remove_file(&progress_file);
-    let _ = fs::remove_file(&img_to_flash);
 
     write_result?;
     verify_result?;
