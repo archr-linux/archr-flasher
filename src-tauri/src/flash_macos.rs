@@ -66,8 +66,9 @@ fn flash_core(
 
     // Step 1b: install the overlay, variant and extlinux switch inside
     // the image. The later verify pass then covers these bytes too. This
-    // intentionally differs from Linux/Windows write -> verify -> config:
-    // mounting this FAT after writing is not supported by macOS. An empty
+    // intentionally differs from Windows write -> verify -> config (Linux
+    // patches first too): mounting this FAT after writing is not supported
+    // by macOS. An empty
     // overlay leaves the existing panel files untouched on this path too.
     diag.push_str(&format!(
         "patching boot partition (dtbo: {}, variant: {})\n",

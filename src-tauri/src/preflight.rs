@@ -36,6 +36,18 @@ impl PreparedImage {
         image._temporary = Some(temporary);
         Ok(image)
     }
+
+    /// A temporary this operation created and owns (a decompressed archive
+    /// or a boot-patch copy), never the user's selected file.
+    pub fn is_private(&self) -> bool {
+        self._temporary.is_some()
+    }
+
+    /// Run the MBR validation again, after this process changed the bytes.
+    pub fn revalidate(&mut self) -> Result<(), String> {
+        self.size = validate_image_file(&mut self.file)?;
+        Ok(())
+    }
 }
 
 /// Open selected sources once. Staging consumes this exact overlay descriptor.

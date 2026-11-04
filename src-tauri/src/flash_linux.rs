@@ -54,11 +54,26 @@ fn flash_core_linux(
     use std::process::{Command, Stdio};
     use std::os::unix::fs::PermissionsExt;
 
+    use tauri::Manager;
+
     let image_path = image.path.to_string_lossy().into_owned();
     validate_device(device)?;
     diag.push_str(&format!(
         "device: {}\nimage: {}\nverify: {}\n", device, image_path, verify
     ));
+
+    // Configure the boot partition inside a private copy before writing,
+    // so nothing ever mounts the card. The cache dir is on the user's data
+    // disk; /tmp is often a small tmpfs.
+    diag.push_str(&format!(
+        "patching boot partition (dtbo: {}, variant: {})\n",
+        custom_dtbo_path, variant
+    ));
+    let work_dir = app.path().app_cache_dir()
+        .map_err(|e| format!("Cache dir error: {}", e))?;
+    let image = stage_boot_config(image, Path::new(custom_dtbo_path), variant, &work_dir)
+        .inspect_err(|e| diag.push_str(&format!("boot patch failed: {}\n", e)))?;
+    diag.push_str(&format!("boot partition patched in {}\n", image.path.display()));
 
     // The GUI materialized and validated any archive in a private file.
     // The privileged helper gets that same descriptor as stdin, never the
@@ -157,8 +172,6 @@ fn flash_core_linux(
         .arg(&script_path)
         .arg(&image_id)
         .arg(device)
-        .arg(custom_dtbo_path)
-        .arg(variant)
         .arg(&progress_file)
         .arg(helper_path.to_str().unwrap_or(""))
         .arg(if verify { "1" } else { "0" })
@@ -249,6 +262,77 @@ fn flash_core_linux(
     Ok(())
 }
 
+/// Install the panel overlay, the variant marker and, for soysauce, the
+/// extlinux switch inside a private copy of the image, before anything
+/// touches the card. Linux used to write the original image and then mount
+/// the new boot partition to copy these files; with an old vfat superblock
+/// still alive in the kernel, that mount reused the old FAT geometry and
+/// the copies corrupted the DTBs. Patching first needs no mount at all and
+/// the verify pass then covers the configuration too.
+///
+/// The selected image is never modified: a raw .img is copied from its
+/// validated descriptor into `work_dir`; an archive was already
+/// decompressed into a private temporary, which is patched in place. The
+/// result is read back, MBR-validated again and handed to the helper
+/// through the same read-only descriptor path as before.
+pub(crate) fn stage_boot_config(
+    mut image: crate::preflight::PreparedImage,
+    dtbo: &Path,
+    variant: &str,
+    work_dir: &Path,
+) -> Result<crate::preflight::PreparedImage, String> {
+    use std::io::{Seek, SeekFrom};
+    let dtbo_bytes = if dtbo.as_os_str().is_empty() {
+        None
+    } else {
+        Some(fs::read(dtbo).map_err(|e| {
+            format!("err:image_patch reading dtbo at {}: {}", dtbo.display(), e)
+        })?)
+    };
+
+    let mut image = if image.is_private() {
+        image
+    } else {
+        fs::create_dir_all(work_dir)
+            .map_err(|e| format!("Cannot create boot-patch directory: {}", e))?;
+        let mut working = tempfile::Builder::new()
+            .prefix("archr-boot-")
+            .suffix(".img")
+            .tempfile_in(work_dir)
+            .map_err(|e| format!("Cannot create private boot-patch image: {}", e))?;
+        image.file.seek(SeekFrom::Start(0))
+            .map_err(|e| format!("Cannot rewind image: {}", e))?;
+        std::io::copy(&mut image.file, working.as_file_mut()).map_err(|e| {
+            if e.raw_os_error() == Some(libc::ENOSPC) {
+                format!("Not enough temp space for the boot-patch copy in {}", work_dir.display())
+            } else {
+                format!("Cannot copy image for boot patch: {}", e)
+            }
+        })?;
+        crate::preflight::PreparedImage::from_temp(working)?
+    };
+
+    crate::rawwrite_unix::patch_boot_partition(&mut image.file, dtbo, variant)?;
+    image.file.sync_all()
+        .map_err(|e| format!("Cannot flush boot-patch image: {}", e))?;
+
+    // Read back what the card will boot from. A mismatch here is a bug in
+    // the patch step and must stop the flash, not surface on the device.
+    let readback = |image: &mut File, path: &str, want: &[u8]| -> Result<(), String> {
+        if crate::rawwrite_unix::read_boot_file(image, path)? != want {
+            return Err(format!("err:image_patch {} differs after patching", path));
+        }
+        Ok(())
+    };
+    if let Some(bytes) = &dtbo_bytes {
+        readback(&mut image.file, "overlays/mipi-panel.dtbo", bytes)?;
+    }
+    readback(&mut image.file, "variant", variant.as_bytes())?;
+
+    image.revalidate()?;
+    Ok(image)
+}
+
 #[cfg(target_os = "linux")]
 const FLASH_SCRIPT: &str = r#"#!/bin/bash
 set -eE
@@ -266,11 +350,11 @@ if [ ! -f /dev/fd/3 ] || [ ! -r /dev/fd/3 ]; then
     exit 1
 fi
 DEVICE="$2"
-CUSTOM_DTBO="$3"
-VARIANT="$4"
-PROGRESS_FILE="$5"
-HELPER="$6"
-VERIFY="$7"   # "1" = run the SHA-256 verify pass, "0" = skip it
+PROGRESS_FILE="$3"
+HELPER="$4"
+VERIFY="$5"   # "1" = run the SHA-256 verify pass, "0" = skip it
+# The panel overlay, variant and extlinux switch are already inside the
+# image (stage_boot_config). This script never mounts the card.
 
 {
 # Up-front diagnostics. When the script aborts later for any reason,
@@ -279,16 +363,8 @@ VERIFY="$7"   # "1" = run the SHA-256 verify pass, "0" = skip it
 echo "=== flash.sh start $(date -u +%FT%TZ) ===" >&2
 echo "  IMAGE   = $IMAGE_ID (stdin)" >&2
 echo "  DEVICE  = $DEVICE" >&2
-echo "  VARIANT = $VARIANT" >&2
-echo "  CUSTOM_DTBO = $CUSTOM_DTBO" >&2
 echo "  HELPER  = $HELPER" >&2
 
-# Repeat source validation after elevation, before unmounting or writing.
-# Empty CUSTOM_DTBO means retain the image's panel configuration.
-if [ -n "$CUSTOM_DTBO" ] && { [ ! -f "$CUSTOM_DTBO" ] || [ ! -r "$CUSTOM_DTBO" ]; }; then
-    echo "dd failed: custom DTBO missing or unreadable at $CUSTOM_DTBO" >&2
-    exit 1
-fi
 if [ ! -b "$DEVICE" ]; then
     echo "dd failed: target $DEVICE is not a block device" >&2
     exit 1
@@ -416,10 +492,8 @@ blockdev --flushbufs "$DEVICE" 2>/dev/null || true
 sleep 1
 blockdev --flushbufs "$DEVICE" 2>/dev/null || true
 
-# Linux deliberately keeps write -> verify -> boot configuration, as on
-# Windows. Verification compares the original image bytes; applying an
-# overlay first would invalidate that comparison. macOS instead patches a
-# private image first because its FAT driver cannot mount the ArchR boot FAT.
+# The boot configuration was patched into the private image before this
+# script ran, as on macOS, so verification covers it and no mount follows.
 # No destructive speed probe: it adds another write to the same cheap SD
 # controllers implicated above. The current Windows/macOS writers also have
 # no speed pre-pass. Do not emit a synthetic speed_ok result with zero MB/s.
@@ -466,61 +540,9 @@ sync
 # aborted with non-zero exit if the hash differed from the image. No
 # second verify here.
 
-# Re-read partition table with retry (kernel may be slow to update)
-for i in 1 2 3; do
-    partprobe "$DEVICE" 2>/dev/null || true
-    sleep 1
-    # Determine boot partition device name
-    if [[ "$DEVICE" == *mmcblk* ]] || [[ "$DEVICE" == *nvme* ]]; then
-        BOOT_PART="${DEVICE}p1"
-    else
-        BOOT_PART="${DEVICE}1"
-    fi
-    [ -b "$BOOT_PART" ] && break
-    sleep 2
-done
-
-if [ ! -b "$BOOT_PART" ]; then
-    echo "Boot partition $BOOT_PART not found after writing" >&2
-    exit 1
-fi
-
-# Mount boot partition with retry (may need time after partprobe)
-MOUNT_DIR=$(mktemp -d)
-MOUNTED=0
-for i in 1 2 3; do
-    if mount "$BOOT_PART" "$MOUNT_DIR" 2>/dev/null; then
-        MOUNTED=1
-        break
-    fi
-    sleep 2
-    partprobe "$DEVICE" 2>/dev/null || true
-done
-
-if [ "$MOUNTED" -ne 1 ]; then
-    echo "Failed to mount boot partition $BOOT_PART" >&2
-    rmdir "$MOUNT_DIR" 2>/dev/null || true
-    exit 1
-fi
-
-# Copy only a selected overlay. Validation already ran before the write.
-if [ -n "$CUSTOM_DTBO" ]; then
-    mkdir -p "$MOUNT_DIR/overlays"
-    cp "$CUSTOM_DTBO" "$MOUNT_DIR/overlays/mipi-panel.dtbo"
-fi
-
-# Write variant file
-echo -n "$VARIANT" > "$MOUNT_DIR/variant"
-
-# Switch extlinux config for soysauce variant (uses explicit FDT)
-if [ "$VARIANT" = "soysauce" ] && [ -f "$MOUNT_DIR/extlinux/extlinux.conf.soysauce" ]; then
-    cp "$MOUNT_DIR/extlinux/extlinux.conf" "$MOUNT_DIR/extlinux/extlinux.conf.bak"
-    cp "$MOUNT_DIR/extlinux/extlinux.conf.soysauce" "$MOUNT_DIR/extlinux/extlinux.conf"
-fi
-
-sync
-umount "$MOUNT_DIR"
-rmdir "$MOUNT_DIR"
+# Let the kernel see the new partition table. Nothing is mounted: the
+# boot partition was configured inside the image before the write.
+partprobe "$DEVICE" 2>/dev/null || true
 
 echo "STAGE:done" > "$PROGRESS_FILE"
 

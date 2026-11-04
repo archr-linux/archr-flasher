@@ -6,12 +6,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-fn flash(dir: &Path, overlay: &str, verify: bool) -> Output {
+fn flash(dir: &Path, verify: bool) -> Output {
     let image = File::open(dir.join("source.img")).ok();
-    flash_with(dir, overlay, verify, image)
+    flash_with(dir, verify, image)
 }
 
-fn flash_with(dir: &Path, overlay: &str, verify: bool, image: Option<File>) -> Output {
+fn flash_with(dir: &Path, verify: bool, image: Option<File>) -> Output {
     let script = dir.join("flash.sh");
     fs::write(&script, FLASH_SCRIPT).unwrap();
     let mocks = dir.join("mocks.sh");
@@ -55,11 +55,8 @@ partprobe() { probe partprobe; return 0; }
 sleep() { return 0; }
 sync() { probe sync; return 0; }
 eject() { return 0; }
-mount() {
-    probe mount
-    cp -a "$TEST_DIR/boot/." "$2/"
-    printf '%s' "$2" > "$TEST_DIR/mount-path"
-}
+# The script must never mount anything: record the attempt and fail.
+mount() { probe mount; printf 'mount\n' >> "$TEST_DIR/events"; return 32; }
 # A partition counts as mounted while $TEST_DIR/mounted-<name> exists. A
 # busy- marker makes a plain umount fail with EBUSY, as when a file manager
 # holds the volume. Lazy (-l) and forced (-f) unmounts "succeed" and are
@@ -67,11 +64,6 @@ mount() {
 findmnt() { [[ -f "$TEST_DIR/mounted-${!###*/}" ]]; }
 umount() {
     local target="${!#}" name="${!###*/}" opt
-    if [[ -f "$TEST_DIR/mount-path" && "$target" == "$(cat "$TEST_DIR/mount-path")" ]]; then
-        cp -a "$target/." "$TEST_DIR/boot/"
-        rm -rf -- "$target/overlays" "$target/variant"
-        return 0
-    fi
     [[ -f "$TEST_DIR/mounted-$name" ]] || return 32
     for opt in "$@"; do
         if [[ "$opt" == -l || "$opt" == -f ]]; then
@@ -107,11 +99,9 @@ if (( (8#$flags & 3) != 0 )); then printf 'helper:stdin-writable\n' >> "$TEST_DI
 printf 'write\n' >> "$TEST_DIR/events"
 cat > "$2"
 if [[ "$VERIFY" == 1 ]]; then
-    cmp "$TEST_DIR/source.img" "$2"
+    cmp /proc/$$/fd/0 "$2"
     printf 'verify\n' >> "$TEST_DIR/events"
 fi
-# Overlay must still be the default when write/verify completes.
-cmp "$TEST_DIR/boot/overlays/mipi-panel.dtbo" "$TEST_DIR/default.dtbo"
 "#,
     )
     .unwrap();
@@ -127,8 +117,6 @@ cmp "$TEST_DIR/boot/overlays/mipi-panel.dtbo" "$TEST_DIR/default.dtbo"
         .arg(script)
         .arg(&id)
         .arg(dir.join("disk"))
-        .arg(overlay)
-        .arg("original")
         .arg(dir.join("progress"))
         .arg(helper)
         .arg(if verify { "1" } else { "0" })
@@ -143,9 +131,6 @@ cmp "$TEST_DIR/boot/overlays/mipi-panel.dtbo" "$TEST_DIR/default.dtbo"
 
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join("boot/overlays")).unwrap();
-    fs::write(dir.path().join("boot/overlays/mipi-panel.dtbo"), b"default").unwrap();
-    fs::write(dir.path().join("default.dtbo"), b"default").unwrap();
     fs::write(dir.path().join("source.img"), b"image data").unwrap();
     fs::write(dir.path().join("disk"), b"untouched target").unwrap();
     fs::write(dir.path().join("disk1"), b"fake boot partition").unwrap();
@@ -153,103 +138,32 @@ fn fixture() -> tempfile::TempDir {
 }
 
 #[test]
-fn linux_skip_overlay_writes_verifies_and_finishes_successfully() {
+fn linux_writes_verifies_and_finishes_without_mounting() {
     let dir = fixture();
-    let output = flash(dir.path(), "", true);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = flash(dir.path(), true);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"image data");
-    assert_eq!(
-        fs::read(dir.path().join("boot/overlays/mipi-panel.dtbo")).unwrap(),
-        b"default"
-    );
-    assert_eq!(
-        fs::read(dir.path().join("boot/variant")).unwrap(),
-        b"original"
-    );
-    assert_eq!(
-        fs::read_to_string(dir.path().join("events")).unwrap(),
-        "write\nverify\n"
-    );
-    assert_eq!(
-        fs::read_to_string(dir.path().join("progress"))
-            .unwrap()
-            .trim(),
-        "STAGE:done"
-    );
-}
-
-#[test]
-fn linux_selected_overlay_is_applied_after_verification() {
-    let dir = fixture();
-    let overlay = dir.path().join("custom.dtbo");
-    fs::write(&overlay, b"custom").unwrap();
-    let output = flash(dir.path(), overlay.to_str().unwrap(), true);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        fs::read(dir.path().join("boot/overlays/mipi-panel.dtbo")).unwrap(),
-        b"custom"
-    );
-    assert_eq!(
-        fs::read_to_string(dir.path().join("events")).unwrap(),
-        "write\nverify\n"
-    );
-}
-
-#[test]
-fn linux_missing_selected_overlay_never_calls_writer() {
-    let dir = fixture();
-    let output = flash(
-        dir.path(),
-        dir.path().join("missing.dtbo").to_str().unwrap(),
-        true,
-    );
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("DTBO"));
-    assert_eq!(
-        fs::read(dir.path().join("disk")).unwrap(),
-        b"untouched target"
-    );
-    assert!(!dir.path().join("events").exists());
+    // No "mount" event: the card is never mounted after the write.
+    assert_eq!(fs::read_to_string(dir.path().join("events")).unwrap(), "write\nverify\n");
+    assert_eq!(fs::read_to_string(dir.path().join("progress")).unwrap().trim(), "STAGE:done");
 }
 
 #[test]
 fn linux_missing_image_never_calls_writer() {
     let dir = fixture();
     fs::remove_file(dir.path().join("source.img")).unwrap();
-    let output = flash(dir.path(), "", true);
+    let output = flash(dir.path(), true);
     assert!(!output.status.success());
-    assert_eq!(
-        fs::read(dir.path().join("disk")).unwrap(),
-        b"untouched target"
-    );
+    assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"untouched target");
     assert!(!dir.path().join("events").exists());
 }
 
 #[test]
-fn linux_skip_overlay_also_succeeds_without_verify() {
+fn linux_also_succeeds_without_verify() {
     let dir = fixture();
-    let output = flash(dir.path(), "", false);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(dir.path().join("events")).unwrap(),
-        "write\n"
-    );
-    assert_eq!(
-        fs::read(dir.path().join("boot/overlays/mipi-panel.dtbo")).unwrap(),
-        b"default"
-    );
+    let output = flash(dir.path(), false);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(fs::read_to_string(dir.path().join("events")).unwrap(), "write\n");
 }
 
 #[test]
@@ -258,7 +172,7 @@ fn linux_image_descriptor_reaches_only_the_helper() {
     // partprobe, mount and sync, before and after the write. None of them
     // may read the image through the fd the script holds for the helper.
     let dir = fixture();
-    let output = flash(dir.path(), "", true);
+    let output = flash(dir.path(), true);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"image data");
     let leaks = fs::read_to_string(dir.path().join("leaks")).unwrap_or_default();
@@ -274,7 +188,7 @@ fn linux_cached_image_reaches_helper_read_only_and_nowhere_else() {
     std::io::Write::write_all(cached.as_file_mut(), b"image data").unwrap();
     std::io::Seek::rewind(cached.as_file_mut()).unwrap();
     let stdin = crate::flashwrite::read_only_descriptor(cached.as_file()).unwrap();
-    let output = flash_with(dir.path(), "", true, Some(stdin));
+    let output = flash_with(dir.path(), true, Some(stdin));
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(fs::read(cached.path()).unwrap(), b"image data", "image was modified");
     assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"image data");
@@ -300,7 +214,7 @@ fn linux_busy_partition_aborts_before_writing() {
     let dir = fixture();
     fs::write(dir.path().join("mounted-disk1"), b"").unwrap();
     fs::write(dir.path().join("busy-disk1"), b"").unwrap();
-    let output = flash(dir.path(), "", true);
+    let output = flash(dir.path(), true);
     assert_aborted_before_writing(dir.path(), &output);
     assert!(dir.path().join("mounted-disk1").exists());
 }
@@ -311,7 +225,7 @@ fn linux_partition_held_without_a_mountpoint_aborts_before_writing() {
     // the partition. BLKRRPART reports it as EBUSY.
     let dir = fixture();
     fs::write(dir.path().join("held"), b"").unwrap();
-    let output = flash(dir.path(), "", true);
+    let output = flash(dir.path(), true);
     assert_aborted_before_writing(dir.path(), &output);
 }
 
@@ -319,8 +233,126 @@ fn linux_partition_held_without_a_mountpoint_aborts_before_writing() {
 fn linux_idle_mounted_partition_is_unmounted_and_written() {
     let dir = fixture();
     fs::write(dir.path().join("mounted-disk1"), b"").unwrap();
-    let output = flash(dir.path(), "", true);
+    let output = flash(dir.path(), true);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(!dir.path().join("mounted-disk1").exists());
     assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"image data");
+}
+
+// ---------------------------------------------------------------------------
+// The boot configuration is patched into a private image before the write.
+// A real FAT32 image (16 KiB clusters, below the FAT32 cluster minimum, as
+// shipped) goes through stage_boot_config, the shipped script and the real
+// helper, into regular files standing in for the card.
+// ---------------------------------------------------------------------------
+use crate::preflight::PreparedImage;
+use crate::test_support::{archr_boot_image, boot_file, pattern, ARCHR_BOOT_START, ARCHR_DTBS};
+
+/// Independent reader: mtools, when installed, on the same byte offset.
+fn mtools_file(card: &Path, name: &str) -> Option<Vec<u8>> {
+    let out = Command::new("mtype")
+        .arg("-i")
+        .arg(format!("{}@@{}", card.display(), ARCHR_BOOT_START))
+        .arg(format!("::/{}", name))
+        .env("MTOOLS_SKIP_CHECK", "1")
+        .output()
+        .ok()?;
+    assert!(out.status.success(), "mtype {}: {}", name, String::from_utf8_lossy(&out.stderr));
+    Some(out.stdout)
+}
+
+fn assert_card_configured(card: &Path, source: &Path, dtbo: &[u8]) {
+    // Geometry of the written boot FAT is the image's: 16 KiB clusters.
+    let bytes = fs::read(card).unwrap();
+    let bpb = &bytes[ARCHR_BOOT_START as usize..][..512];
+    let cluster = u16::from_le_bytes([bpb[11], bpb[12]]) as u32 * bpb[13] as u32;
+    assert_eq!(cluster, 16 * 1024, "boot FAT cluster size");
+    let mut expected: Vec<(String, Vec<u8>)> = vec![
+        ("overlays/mipi-panel.dtbo".into(), dtbo.to_vec()),
+        ("variant".into(), b"soysauce".to_vec()),
+        ("extlinux/extlinux.conf".into(), b"soysauce config".to_vec()),
+        ("extlinux/extlinux.conf.bak".into(), b"default config".to_vec()),
+        ("KERNEL".into(), boot_file(source, "KERNEL")),
+    ];
+    for name in ARCHR_DTBS {
+        let path = format!("dtbs/{}", name);
+        let original = boot_file(source, &path);
+        expected.push((path, original));
+    }
+    for (name, want) in &expected {
+        assert!(boot_file(card, name) == *want, "fatfs: {} differs on the card", name);
+        if let Some(got) = mtools_file(card, name) {
+            assert!(got == *want, "mtools: {} differs on the card", name);
+        }
+    }
+}
+
+#[test]
+fn linux_flashed_card_has_overlay_variant_and_intact_dtbs() {
+    let dir = fixture();
+    let source = dir.path().join("archr.img");
+    archr_boot_image(&source);
+    let original = fs::read(&source).unwrap();
+    let dtbo_bytes = pattern(7, 3_000);
+    let dtbo = dir.path().join("staged.dtbo");
+    fs::write(&dtbo, &dtbo_bytes).unwrap();
+    let work = dir.path().join("cache");
+
+    let prepared = PreparedImage::from_file(File::open(&source).unwrap(), source.clone()).unwrap();
+    let staged = super::stage_boot_config(prepared, &dtbo, "soysauce", &work).unwrap();
+    assert!(staged.path.starts_with(&work), "patch copy is not private: {}", staged.path.display());
+    assert!(fs::read(&source).unwrap() == original, "the selected image was modified");
+
+    // Shipped script: the descriptor of the patched image reaches the helper,
+    // which writes it to the file-backed "disk". No mount happens.
+    let stdin = crate::flashwrite::read_only_descriptor(&staged.file).unwrap();
+    let output = flash_with(dir.path(), true, Some(stdin));
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(fs::read_to_string(dir.path().join("events")).unwrap(), "write\nverify\n");
+    assert_card_configured(&dir.path().join("disk"), &source, &dtbo_bytes);
+
+    // Real helper with verify on: it hashes the patched image, so the
+    // comparison covers the overlay and variant bytes too.
+    let card = dir.path().join("card.img");
+    File::create(&card).unwrap().set_len(staged.size).unwrap();
+    let id = crate::flashwrite::image_identity(&staged.file).unwrap();
+    let args = [id, card.to_string_lossy().into_owned(), dir.path().join("progress2").to_string_lossy().into_owned()];
+    let read_only = crate::flashwrite::read_only_descriptor(&staged.file).unwrap();
+    assert_eq!(crate::flashwrite::entry_with_image(read_only, &args), 0);
+    assert_card_configured(&card, &source, &dtbo_bytes);
+
+    let temp = staged.path.clone();
+    drop(staged);
+    assert!(!temp.exists(), "patch copy left behind");
+}
+
+#[test]
+fn linux_decompressed_image_is_patched_in_place_and_revalidated() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut private = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+    archr_boot_image(private.path());
+    std::io::Seek::rewind(private.as_file_mut()).unwrap();
+    let prepared = PreparedImage::from_temp(private).unwrap();
+    let path = prepared.path.clone();
+    let staged = super::stage_boot_config(prepared, Path::new(""), "clone", &dir.path().join("cache")).unwrap();
+    assert_eq!(staged.path, path, "an owned temporary needs no second copy");
+    assert_eq!(boot_file(&path, "variant"), b"clone");
+    assert_eq!(boot_file(&path, "overlays/mipi-panel.dtbo"), b"original panel");
+    assert!(!dir.path().join("cache").exists());
+}
+
+#[test]
+fn linux_missing_overlay_fails_before_copying_or_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("archr.img");
+    archr_boot_image(&source);
+    let original = fs::read(&source).unwrap();
+    let work = dir.path().join("cache");
+    let prepared = PreparedImage::from_file(File::open(&source).unwrap(), source.clone()).unwrap();
+    let err = super::stage_boot_config(prepared, &dir.path().join("missing.dtbo"), "original", &work)
+        .err()
+        .unwrap();
+    assert!(err.contains("dtbo"), "{}", err);
+    assert!(fs::read(&source).unwrap() == original);
+    assert!(!work.exists() || fs::read_dir(&work).unwrap().count() == 0);
 }
