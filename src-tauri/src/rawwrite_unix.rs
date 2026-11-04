@@ -144,25 +144,25 @@ pub fn write_image_to_raw_fd(
     device_size: Option<u64>,
     mut progress: impl FnMut(u64),
 ) -> Result<WriteOutcome, String> {
+    // Open the required source before even the signature wipe touches the target.
+    let mut src = File::open(image)
+        .map_err(|e| format!("Cannot open image: {}", e))?;
     let zeros = vec![0u8; MB as usize];
     dev.seek(SeekFrom::Start(0))
         .map_err(|e| format!("err:write_failed seek 0: {}", e))?;
     dev.write_all(&zeros)
         .map_err(|e| format!("err:write_failed wiping first MB: {}", e))?;
-    if let Some(size) = device_size {
-        if size > 2 * MB {
+    if let Some(size) = device_size
+        && size > 2 * MB {
             let last_mb = (size / MB - 1) * MB;
             dev.seek(SeekFrom::Start(last_mb))
                 .map_err(|e| format!("err:write_failed seek last MB: {}", e))?;
             dev.write_all(&zeros)
                 .map_err(|e| format!("err:write_failed wiping last MB: {}", e))?;
         }
-    }
     dev.seek(SeekFrom::Start(0))
         .map_err(|e| format!("err:write_failed seek rewind: {}", e))?;
 
-    let mut src = File::open(image)
-        .map_err(|e| format!("Cannot open image: {}", e))?;
     let mut buf = vec![0u8; CHUNK];
     let mut done: u64 = 0;
     loop {
@@ -266,17 +266,20 @@ fn full_sync(f: &File) -> std::io::Result<()> {
 /// ArchR boot FAT is a below-spec-cluster-count FAT32 that the macOS
 /// msdos driver refuses to mount, so post-flash configuration through
 /// the OS is impossible there. Patching the image up front also means a
-/// subsequent verify pass covers the configuration bytes too.
+/// subsequent verify pass covers the configuration bytes too. An empty
+/// `dtbo` path preserves the existing overlay, including its absence.
 pub fn patch_boot_partition(image: &Path, dtbo: &Path, variant: &str) -> Result<(), String> {
     use std::io::Read;
 
-    if !dtbo.is_file() {
-        return Err(format!("err:image_patch custom DTBO not found at {}", dtbo.display()));
-    }
-    let mut dtbo_bytes = Vec::new();
-    File::open(dtbo)
-        .and_then(|mut f| f.read_to_end(&mut dtbo_bytes))
-        .map_err(|e| format!("err:image_patch reading dtbo: {}", e))?;
+    let dtbo_bytes = if dtbo.as_os_str().is_empty() {
+        None
+    } else {
+        let mut bytes = Vec::new();
+        File::open(dtbo)
+            .and_then(|mut f| f.read_to_end(&mut bytes))
+            .map_err(|e| format!("err:image_patch reading dtbo at {}: {}", dtbo.display(), e))?;
+        Some(bytes)
+    };
 
     let mut img = std::fs::OpenOptions::new()
         .read(true)
@@ -316,17 +319,18 @@ pub fn patch_boot_partition(image: &Path, dtbo: &Path, variant: &str) -> Result<
     {
         let root = fs.root_dir();
 
-        let overlays = root
-            .create_dir("overlays")
-            .map_err(|e| format!("err:image_patch overlays dir: {}", e))?;
-        let mut f = overlays
-            .create_file("mipi-panel.dtbo")
-            .map_err(|e| format!("err:image_patch creating overlay: {}", e))?;
-        f.truncate()
-            .map_err(|e| format!("err:image_patch truncating overlay: {}", e))?;
-        f.write_all(&dtbo_bytes)
-            .map_err(|e| format!("err:image_patch writing overlay: {}", e))?;
-        drop(f);
+        if let Some(dtbo_bytes) = dtbo_bytes {
+            let overlays = root
+                .create_dir("overlays")
+                .map_err(|e| format!("err:image_patch overlays dir: {}", e))?;
+            let mut f = overlays
+                .create_file("mipi-panel.dtbo")
+                .map_err(|e| format!("err:image_patch creating overlay: {}", e))?;
+            f.truncate()
+                .map_err(|e| format!("err:image_patch truncating overlay: {}", e))?;
+            f.write_all(&dtbo_bytes)
+                .map_err(|e| format!("err:image_patch writing overlay: {}", e))?;
+        }
 
         let mut v = root
             .create_file("variant")
@@ -342,13 +346,10 @@ pub fn patch_boot_partition(image: &Path, dtbo: &Path, variant: &str) -> Result<
                 .open_dir("extlinux")
                 .map_err(|e| format!("err:image_patch extlinux dir: {}", e))?;
             let mut soys = Vec::new();
-            match extlinux.open_file("extlinux.conf.soysauce") {
-                Ok(mut f) => {
-                    f.read_to_end(&mut soys)
-                        .map_err(|e| format!("err:image_patch reading soysauce conf: {}", e))?;
-                }
-                // Older images without the alternate config keep the default.
-                Err(_) => {}
+            // Older images without the alternate config keep the default.
+            if let Ok(mut f) = extlinux.open_file("extlinux.conf.soysauce") {
+                f.read_to_end(&mut soys)
+                    .map_err(|e| format!("err:image_patch reading soysauce conf: {}", e))?;
             }
             if !soys.is_empty() {
                 let mut cur = Vec::new();

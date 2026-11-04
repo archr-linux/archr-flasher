@@ -54,6 +54,12 @@ fn flash_core_linux(
     use std::process::{Command, Stdio};
     use std::os::unix::fs::PermissionsExt;
 
+    let custom_dtbo_path = custom_dtbo_path.trim();
+    crate::preflight::validate_flash_inputs(image_path, custom_dtbo_path)?;
+    let staged_overlay = crate::preflight::stage_overlay(custom_dtbo_path)?;
+    let custom_dtbo_path = staged_overlay.as_ref()
+        .map(|file| file.path().to_str().ok_or("Overlay staging path is not UTF-8"))
+        .transpose()?.unwrap_or("");
     validate_device(device)?;
     diag.push_str(&format!(
         "device: {}\nimage: {}\nverify: {}\n", device, image_path, verify
@@ -288,8 +294,14 @@ echo "  VARIANT = $VARIANT" >&2
 echo "  CUSTOM_DTBO = $CUSTOM_DTBO" >&2
 echo "  HELPER  = $HELPER" >&2
 
-if [ ! -f "$IMAGE" ]; then
-    echo "dd failed: source image missing at $IMAGE" >&2
+if [ ! -f "$IMAGE" ] || [ ! -r "$IMAGE" ]; then
+    echo "dd failed: source image missing or unreadable at $IMAGE" >&2
+    exit 1
+fi
+# Repeat source validation after elevation, before unmounting or writing.
+# Empty CUSTOM_DTBO means retain the image's panel configuration.
+if [ -n "$CUSTOM_DTBO" ] && { [ ! -f "$CUSTOM_DTBO" ] || [ ! -r "$CUSTOM_DTBO" ]; }; then
+    echo "dd failed: custom DTBO missing or unreadable at $CUSTOM_DTBO" >&2
     exit 1
 fi
 if [ ! -b "$DEVICE" ]; then
@@ -400,17 +412,19 @@ blockdev --flushbufs "$DEVICE" 2>/dev/null || true
 # Tiny pause for udev events from the unmounts above to settle. We
 # deliberately do NOT zero the first/last MB any more: the image
 # writes through the same byte range, and the pre-passes were
-# implicated in the deterministic-mismatch corruption pattern.
+# implicated in the deterministic-mismatch corruption pattern. macOS keeps
+# its existing signature wipe in rawwrite_unix.rs; importing that pre-pass
+# here would undo the Linux controller-corruption workaround above.
 sleep 1
 blockdev --flushbufs "$DEVICE" 2>/dev/null || true
 
-# Inform the GUI we're entering the write stage. The native helper
-# below publishes live byte counts to PROGRESS_FILE during write and
-# "STAGE:verifying:NN" during verify; the Rust poller in flash.rs
-# already understands both formats. Skipping the legacy STAGE:speed_*
-# events: they were tied to the dd path and the GUI just shows a
-# generic "writing" label now.
-echo "STAGE:speed_ok:0" > "$PROGRESS_FILE"
+# Linux deliberately keeps write -> verify -> boot configuration, as on
+# Windows. Verification compares the original image bytes; applying an
+# overlay first would invalidate that comparison. macOS instead patches a
+# private image first because its FAT driver cannot mount the ArchR boot FAT.
+# No destructive speed probe: it adds another write to the same cheap SD
+# controllers implicated above. The current Windows/macOS writers also have
+# no speed pre-pass. Do not emit a synthetic speed_ok result with zero MB/s.
 echo "STAGE:writing" > "$PROGRESS_FILE"
 
 # === WRITE + VERIFY (native helper) ===
@@ -489,15 +503,11 @@ if [ "$MOUNTED" -ne 1 ]; then
     exit 1
 fi
 
-# Copy custom DTBO as mipi-panel.dtbo
-if [ ! -f "$CUSTOM_DTBO" ]; then
-    echo "ERROR: Custom DTBO not found at $CUSTOM_DTBO" >&2
-    umount "$MOUNT_DIR" 2>/dev/null || true
-    rmdir "$MOUNT_DIR" 2>/dev/null || true
-    exit 1
+# Copy only a selected overlay. Validation already ran before the write.
+if [ -n "$CUSTOM_DTBO" ]; then
+    mkdir -p "$MOUNT_DIR/overlays"
+    cp "$CUSTOM_DTBO" "$MOUNT_DIR/overlays/mipi-panel.dtbo"
 fi
-mkdir -p "$MOUNT_DIR/overlays"
-cp "$CUSTOM_DTBO" "$MOUNT_DIR/overlays/mipi-panel.dtbo"
 
 # Write variant file
 echo -n "$VARIANT" > "$MOUNT_DIR/variant"
@@ -517,3 +527,7 @@ echo "STAGE:done" > "$PROGRESS_FILE"
 # Eject the device
 eject "$DEVICE" 2>/dev/null || true
 "#;
+
+#[cfg(test)]
+#[path = "flash_linux_tests.rs"]
+mod tests;

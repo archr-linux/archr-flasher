@@ -53,6 +53,12 @@ fn flash_core(
 ) -> Result<(), String> {
     use std::process::Command;
 
+    let custom_dtbo_path = custom_dtbo_path.trim();
+    crate::preflight::validate_flash_inputs(image_path, custom_dtbo_path)?;
+    let staged_overlay = crate::preflight::stage_overlay(custom_dtbo_path)?;
+    let custom_dtbo_path = staged_overlay.as_ref()
+        .map(|file| file.path().to_str().ok_or("Overlay staging path is not UTF-8"))
+        .transpose()?.unwrap_or("");
     validate_device(device)?;
     diag.push_str(&format!("device: {}\nimage: {}\nverify: {}\n", device, image_path, verify));
 
@@ -86,7 +92,10 @@ fn flash_core(
     let img_to_flash = temp_img;
 
     // Step 1b: install the overlay, variant and extlinux switch inside
-    // the image. The later verify pass then covers these bytes too.
+    // the image. The later verify pass then covers these bytes too. This
+    // intentionally differs from Linux/Windows write -> verify -> config:
+    // mounting this FAT after writing is not supported by macOS. An empty
+    // overlay leaves the existing panel files untouched on this path too.
     diag.push_str(&format!(
         "patching boot partition (dtbo: {}, variant: {})\n",
         custom_dtbo_path, variant

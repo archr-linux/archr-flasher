@@ -628,6 +628,12 @@ fn flash_core_windows(
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+    let custom_dtbo_path = custom_dtbo_path.trim();
+    crate::preflight::validate_flash_inputs(image_path, custom_dtbo_path)?;
+    let staged_overlay = crate::preflight::stage_overlay(custom_dtbo_path)?;
+    let custom_dtbo_path = staged_overlay.as_ref()
+        .map(|file| file.path().to_str().ok_or("Overlay staging path is not UTF-8"))
+        .transpose()?.unwrap_or("");
     validate_device(device)?;
     diag.push_str(&format!(
         "device: {}\nimage: {}\nverify: {}\n", device, image_path, verify
@@ -789,15 +795,15 @@ try {{
         throw "Boot partition drive $bootDrive not accessible"
     }}
 
-    # Copy custom DTBO as mipi-panel.dtbo
-    $overlayDir = Join-Path $bootDrive "overlays"
-    if (-not (Test-Path $overlayDir)) {{
-        New-Item -ItemType Directory -Path $overlayDir -Force | Out-Null
+    # Empty means retain the panel configuration shipped in the image.
+    # Selected sources were validated in Rust before the raw write.
+    if (-not [string]::IsNullOrWhiteSpace($CustomDTBO)) {{
+        $overlayDir = Join-Path $bootDrive "overlays"
+        if (-not (Test-Path -LiteralPath $overlayDir)) {{
+            New-Item -ItemType Directory -Path $overlayDir -Force | Out-Null
+        }}
+        Copy-Item -LiteralPath $CustomDTBO -Destination (Join-Path $overlayDir "mipi-panel.dtbo") -Force
     }}
-    if (-not (Test-Path $CustomDTBO)) {{
-        throw "Custom DTBO not found at $CustomDTBO"
-    }}
-    Copy-Item $CustomDTBO (Join-Path $overlayDir "mipi-panel.dtbo") -Force
 
     # Write variant file
     Set-Content -Path (Join-Path $bootDrive "variant") -Value $Variant -NoNewline

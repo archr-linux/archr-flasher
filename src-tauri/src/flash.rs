@@ -164,12 +164,11 @@ pub(crate) fn poll_flash_progress(
                         "detail": detail
                     }));
                     emit_progress(&app, 0.0, "verify_failed");
-                } else if let Ok(bytes) = content.parse::<u64>() {
-                    if image_size > 0 {
+                } else if let Ok(bytes) = content.parse::<u64>()
+                    && image_size > 0 {
                         let pct = 55.0 + (bytes as f64 / image_size as f64 * 35.0).min(35.0);
                         emit_progress_bytes(&app, pct, "writing", bytes, image_size);
                     }
-                }
             }
         }
     })

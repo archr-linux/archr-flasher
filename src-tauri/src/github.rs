@@ -183,9 +183,9 @@ pub async fn download_image(
     let hash_path = cache_dir.join(format!("{}.sha256", release.image_name));
 
     // Check if already cached (same name + matching size)
-    if dest.exists() {
-        if let Ok(meta) = fs::metadata(&dest) {
-            if meta.len() == release.size_bytes {
+    if dest.exists()
+        && let Ok(meta) = fs::metadata(&dest)
+            && meta.len() == release.size_bytes {
                 // If we have a stored hash, verify integrity
                 if let Ok(stored_hash) = fs::read_to_string(&hash_path) {
                     let stored_hash = stored_hash.trim().to_string();
@@ -208,8 +208,6 @@ pub async fn download_image(
                     return Ok((dest, true));
                 }
             }
-        }
-    }
 
     // Download path: tight connect_timeout so we fail fast if offline,
     // but NO overall timeout because a legitimate ~1.5 GB download
@@ -275,8 +273,8 @@ pub async fn download_image(
     let _ = fs::write(&hash_path, &hash);
 
     // Verify against expected hash from release (if available)
-    if let Some(ref expected) = release.expected_sha256 {
-        if hash != *expected {
+    if let Some(ref expected) = release.expected_sha256
+        && hash != *expected {
             let _ = fs::remove_file(&temp);
             let _ = fs::remove_file(&hash_path);
             return Err(format!(
@@ -284,7 +282,6 @@ pub async fn download_image(
                 expected, hash
             ));
         }
-    }
 
     // Rename .part → final name
     fs::rename(&temp, &dest)

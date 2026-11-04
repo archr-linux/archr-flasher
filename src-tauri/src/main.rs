@@ -6,6 +6,9 @@ mod disk;
 mod flash;
 mod github;
 mod overlay;
+mod preflight;
+#[cfg(all(test, unix))]
+mod flash_tests;
 // Privileged disk-write helper, run as the hidden `__flash-write`
 // subcommand (see main()). Linux-only: it relies on O_DIRECT /
 // posix_fadvise. Folding it in here keeps the crate at a single binary
@@ -113,14 +116,13 @@ async fn verify_image(
     }).await
         .map_err(|e| format!("Task error: {}", e))??;
 
-    if let Some(expected) = expected_hash {
-        if hash != expected {
+    if let Some(expected) = expected_hash
+        && hash != expected {
             return Err(format!(
                 "SHA256 mismatch\nExpected: {}\nGot: {}",
                 expected, hash
             ));
         }
-    }
 
     Ok(hash)
 }
@@ -156,19 +158,10 @@ async fn flash_image(
         .map_err(|e| format!("Cache dir error: {}", e))?;
 
     tokio::task::spawn_blocking(move || {
-        // Validate the overlay path early so the user gets the error
-        // before we touch the SD card. Empty path is the "skip" sentinel
-        // and is allowed.
+        // Empty overlay is the skip sentinel on every platform. Validate
+        // the image too, even when a cached decompression already exists.
         let trimmed_overlay = overlay_path.trim();
-        if !trimmed_overlay.is_empty() {
-            let p = std::path::Path::new(trimmed_overlay);
-            if !p.is_absolute() || !p.is_file() {
-                return Err(format!(
-                    "Overlay path must be an existing file: {}",
-                    trimmed_overlay
-                ));
-            }
-        }
+        preflight::validate_flash_inputs(&image_path, trimmed_overlay)?;
 
         // Decompress .xz/.gz into a cached temp image so flash_image_
         // privileged can write it block-for-block. If the source archive

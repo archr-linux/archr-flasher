@@ -42,6 +42,7 @@ fatfs = { path = "vendor/fatfs" }
 fscommon = "0.1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tempfile = "3"
 
 [features]
 default = ["custom-protocol"]

@@ -41,7 +41,7 @@ pub fn list_removable_disks() -> Vec<DiskInfo> {
         }
 
         // Never list system disk (where / is mounted)
-        if system_disks.iter().any(|sd| name == *sd) {
+        if system_disks.contains(&name) {
             continue;
         }
 
@@ -129,11 +129,10 @@ fn get_system_disk_names() -> Vec<String> {
 fn strip_partition_suffix(dev: &str) -> String {
     if dev.contains("nvme") || dev.contains("mmcblk") {
         // These use "p" + number suffix: nvme0n1p2 → nvme0n1, mmcblk0p1 → mmcblk0
-        if let Some(idx) = dev.rfind('p') {
-            if dev[idx + 1..].chars().all(|c| c.is_ascii_digit()) && !dev[idx + 1..].is_empty() {
+        if let Some(idx) = dev.rfind('p')
+            && dev[idx + 1..].chars().all(|c| c.is_ascii_digit()) && !dev[idx + 1..].is_empty() {
                 return dev[..idx].to_string();
             }
-        }
         dev.to_string()
     } else {
         // sd* devices: sda1 → sda (strip trailing digits)
