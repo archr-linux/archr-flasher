@@ -12,6 +12,12 @@ fn flash(dir: &Path, verify: bool) -> Output {
 }
 
 fn flash_with(dir: &Path, verify: bool, image: Option<File>) -> Output {
+    flash_in_locale(dir, verify, image, "C")
+}
+
+/// Run the script as pkexec would for a user with this LANG: no LC_ALL or
+/// LC_MESSAGES override, so localized tools speak the user's language.
+fn flash_in_locale(dir: &Path, verify: bool, image: Option<File>, lang: &str) -> Output {
     let script = dir.join("flash.sh");
     fs::write(&script, FLASH_SCRIPT).unwrap();
     let mocks = dir.join("mocks.sh");
@@ -44,8 +50,17 @@ blockdev() {
     if [[ "$1" == --getsize64 ]]; then stat -c%s "$2"; fi
     # A superblock still holding a partition (lazily detached or not)
     # makes BLKRRPART fail with EBUSY.
+    # The message follows the locale, as util-linux and glibc strerror do
+    # (LC_ALL, then LC_MESSAGES, then LANG). pkexec keeps the user's locale.
     if [[ "$1" == --rereadpt && -f "$TEST_DIR/held" ]]; then
-        echo "blockdev: ioctl error on BLKRRPART: Device or resource busy" >&2
+        case "${LC_ALL:-${LC_MESSAGES:-$LANG}}" in
+            pt_BR*) echo "blockdev: erro de ioctl em BLKRRPART: Dispositivo ou recurso está ocupado" >&2 ;;
+            es*) echo "blockdev: error de ioctl en BLKRRPART: Dispositivo o recurso ocupado" >&2 ;;
+            ru*) echo "blockdev: ошибка ioctl на BLKRRPART: Устройство или ресурс занято" >&2 ;;
+            zh*) echo "blockdev: BLKRRPART 上的 ioctl 出错: 设备或资源忙" >&2 ;;
+            de*) echo "blockdev: ioctl-Fehler bei BLKRRPART: Das Gerät oder die Ressource ist belegt" >&2 ;;
+            *) echo "blockdev: ioctl error on BLKRRPART: Device or resource busy" >&2 ;;
+        esac
         return 1
     fi
     return 0
@@ -125,6 +140,9 @@ fi
         .env("TEST_IMAGE_ID", &id)
         .stdin(stdin)
         .env("TMPDIR", dir)
+        .env_remove("LC_ALL")
+        .env_remove("LC_MESSAGES")
+        .env("LANG", lang)
         .output()
         .unwrap()
 }
@@ -355,4 +373,20 @@ fn linux_missing_overlay_fails_before_copying_or_writing() {
     assert!(err.contains("dtbo"), "{}", err);
     assert!(fs::read(&source).unwrap() == original);
     assert!(!work.exists() || fs::read_dir(&work).unwrap().count() == 0);
+}
+
+#[test]
+fn linux_held_partition_aborts_in_every_user_locale() {
+    // BLKRRPART EBUSY must abort whatever language blockdev answers in.
+    for lang in ["C", "en_US.UTF-8", "pt_BR.UTF-8", "es_ES.UTF-8", "ru_RU.UTF-8", "zh_CN.UTF-8", "de_DE.UTF-8"] {
+        let dir = fixture();
+        fs::write(dir.path().join("held"), b"").unwrap();
+        let image = File::open(dir.path().join("source.img")).ok();
+        let output = flash_in_locale(dir.path(), true, image, lang);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "LANG={}: flashed a held card: {}", lang, stderr);
+        assert!(stderr.contains("card in use:"), "LANG={}: {}", lang, stderr);
+        assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"untouched target", "LANG={}", lang);
+        assert!(!dir.path().join("events").exists(), "LANG={}: the writer ran", lang);
+    }
 }

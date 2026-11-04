@@ -337,6 +337,9 @@ pub(crate) fn stage_boot_config(
 const FLASH_SCRIPT: &str = r#"#!/bin/bash
 set -eE
 trap 'echo "Script error at line $LINENO: $BASH_COMMAND" >&2' ERR
+# pkexec keeps the user's locale. Everything this script parses (the
+# BLKRRPART error text) must be the untranslated C message.
+export LC_ALL=C
 
 # The image is stdin: the descriptor the GUI validated. $1 is only its
 # dev:ino:size identity, rechecked by the helper. Park it on fd 3 and give
@@ -458,12 +461,13 @@ release_card() {
     # No mountpoint left. A superblock detached earlier, or any other open
     # holder, still makes the kernel refuse to re-read the partition table.
     # Only EBUSY aborts: a reader that rejects BLKRRPART for another reason
-    # says nothing about holders.
+    # says nothing about holders. blockdev exits 1 for every errno, so the
+    # decision rests on the C-locale strerror text of EBUSY.
     local err
     for tries in 1 2 3; do
-        err=$(blockdev --rereadpt "$DEVICE" 2>&1) && return 0
+        err=$(LC_ALL=C blockdev --rereadpt "$DEVICE" 2>&1) && return 0
         case "$err" in
-            *[Bb]usy*) sleep 1 ;;
+            *"Device or resource busy"*) sleep 1 ;;
             *) echo "  rereadpt: $err (ignored)" >&2; return 0 ;;
         esac
     done
