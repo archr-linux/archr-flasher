@@ -205,6 +205,11 @@ fn flash_core_linux(
         let stderr = stderr.trim();
         for line in stderr.lines() {
             let l = line.trim();
+            // Busy card: nothing was written, the user only has to close
+            // whatever holds it. Checked first, it is the actionable cause.
+            if let Some(rest) = l.strip_prefix("card in use:") {
+                return Err(format!("err:card_in_use {}", rest.trim()));
+            }
             if let Some(rest) = l.strip_prefix("dd failed:") {
                 return Err(format!("dd error: {}", rest.trim()));
             }
@@ -348,37 +353,51 @@ restore_udisks2() {
 }
 trap restore_udisks2 EXIT
 
-# Unmount any existing mount points for partitions of this device in a
-# four-level fallback chain matching rpi-imager's platformquirks_linux:
-# normal -> MNT_EXPIRE x2 -> MNT_DETACH (lazy) -> MNT_FORCE.
-# umount2(MNT_EXPIRE) marks a mountpoint "expired"; the second call
-# expires it for real if no access happened in between, which is the
-# graceful path. MNT_FORCE is documented as "may cause data loss" and
-# is only used as a last resort.
-unmount_all() {
+# Release every partition of this device, or refuse to write. Never use
+# umount -l (MNT_DETACH) or umount -f: a detached vfat stays alive in the
+# kernel while something holds it, and the later mount of the new boot
+# partition reused that old superblock, old FAT geometry included. Files
+# written through it landed on top of the DTBs. A partition that does not
+# let go aborts the flash before a single byte reaches the card.
+release_card() {
+    local part tries busy=()
     for part in "${DEVICE}"*; do
         [ -b "$part" ] || continue
-        # Politely tell the desktop session manager to release the mount
-        udisksctl unmount -b "$part" --no-user-interaction 2>/dev/null || true
-        # Normal umount
-        umount "$part" 2>/dev/null && continue
-        # MNT_EXPIRE pair (graceful retire)
-        umount --no-canonicalize "$part" 2>/dev/null || true
-        sleep 0.2
-        umount --no-canonicalize "$part" 2>/dev/null && continue
-        # Lazy unmount (MNT_DETACH): hides from namespace, lets in-flight
-        # I/O complete in background.
-        umount -l "$part" 2>/dev/null && continue
-        # Force (MNT_FORCE): last resort. We log it because if we get
-        # here the filesystem may have unflushed writes.
-        if umount -f "$part" 2>/dev/null; then
-            echo "warning: forced unmount of $part (data may be lost)" >&2
-        fi
+        tries=0
+        while findmnt -rn -S "$part" >/dev/null 2>&1; do
+            if [ "$tries" -ge 3 ]; then
+                busy+=("$part")
+                break
+            fi
+            # Ask the desktop session first, then a plain umount.
+            udisksctl unmount -b "$part" --no-user-interaction >/dev/null 2>&1 || true
+            umount "$part" 2>/dev/null || sleep 1
+            tries=$((tries + 1))
+        done
     done
+    if [ "${#busy[@]}" -gt 0 ]; then
+        echo "card in use: ${busy[*]} still mounted (EBUSY)" >&2
+        return 1
+    fi
+    # No mountpoint left. A superblock detached earlier, or any other open
+    # holder, still makes the kernel refuse to re-read the partition table.
+    # Only EBUSY aborts: a reader that rejects BLKRRPART for another reason
+    # says nothing about holders.
+    local err
+    for tries in 1 2 3; do
+        err=$(blockdev --rereadpt "$DEVICE" 2>&1) && return 0
+        case "$err" in
+            *[Bb]usy*) sleep 1 ;;
+            *) echo "  rereadpt: $err (ignored)" >&2; return 0 ;;
+        esac
+    done
+    echo "card in use: $DEVICE is held open (BLKRRPART: $err)" >&2
+    return 1
 }
 
-# Aggressive unmount + give the kernel a beat to settle uevents
-unmount_all
+if ! release_card; then
+    exit 1
+fi
 sleep 2
 
 # Flush kernel buffers (do NOT wipefs or write garbage to the device

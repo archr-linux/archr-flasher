@@ -74,6 +74,7 @@
   "error_invalid_device": "Invalid device selected.",
   "error_write_protected": "The card is write-protected. Check the lock switch on the SD adapter.",
   "error_device_busy": "The card is in use by another program. Close any window showing it (and run as administrator), then try again.",
+  "error_card_in_use": "Close whatever is using the card (file manager, terminal) and try again. Nothing was written.",
   "error_media": "Media error while accessing the card. It may be failing — try another SD card.",
   "error_open_device": "Could not open the SD card device.",
   "overlay_sd": "SD Card",

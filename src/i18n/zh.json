@@ -74,6 +74,7 @@
   "error_invalid_device": "所选设备无效。",
   "error_write_protected": "存储卡处于写保护状态。请检查 SD 适配器上的锁定开关。",
   "error_device_busy": "存储卡正被其他程序占用。请关闭显示该卡的窗口（并以管理员身份运行），然后重试。",
+  "error_card_in_use": "请关闭正在使用存储卡的程序（文件管理器、终端），然后重试。未写入任何数据。",
   "error_media": "访问存储卡时发生介质错误。它可能已损坏——请尝试其他 SD 卡。",
   "error_open_device": "无法打开 SD 卡设备。",
   "overlay_sd": "SD 卡",

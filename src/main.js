@@ -773,6 +773,7 @@ function translateError(msg) {
     // Stable tokens from the native Windows writer (flash_windows.rs).
     [/err:write_protected/i, 'error_write_protected'],
     [/err:device_busy/i, 'error_device_busy'],
+    [/err:card_in_use/i, 'error_card_in_use'],
     [/err:media/i, 'error_media'],
     [/err:open_device/i, 'error_open_device'],
     [/err:dd_write|err:write_failed/i, 'error_write_failed'],

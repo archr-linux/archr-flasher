@@ -40,7 +40,16 @@ probe() {
 }
 date() { probe date; command date "$@"; }
 systemctl() { probe systemctl; return 1; }
-blockdev() { if [[ "$1" == --getsize64 ]]; then stat -c%s "$2"; fi; }
+blockdev() {
+    if [[ "$1" == --getsize64 ]]; then stat -c%s "$2"; fi
+    # A superblock still holding a partition (lazily detached or not)
+    # makes BLKRRPART fail with EBUSY.
+    if [[ "$1" == --rereadpt && -f "$TEST_DIR/held" ]]; then
+        echo "blockdev: ioctl error on BLKRRPART: Device or resource busy" >&2
+        return 1
+    fi
+    return 0
+}
 udisksctl() { probe udisksctl; return 0; }
 partprobe() { probe partprobe; return 0; }
 sleep() { return 0; }
@@ -51,11 +60,31 @@ mount() {
     cp -a "$TEST_DIR/boot/." "$2/"
     printf '%s' "$2" > "$TEST_DIR/mount-path"
 }
+# A partition counts as mounted while $TEST_DIR/mounted-<name> exists. A
+# busy- marker makes a plain umount fail with EBUSY, as when a file manager
+# holds the volume. Lazy (-l) and forced (-f) unmounts "succeed" and are
+# logged: that is the detach that left a live vfat superblock behind.
+findmnt() { [[ -f "$TEST_DIR/mounted-${!###*/}" ]]; }
 umount() {
-    if [[ -f "$TEST_DIR/mount-path" && "$1" == "$(cat "$TEST_DIR/mount-path")" ]]; then
-        cp -a "$1/." "$TEST_DIR/boot/"
-        rm -rf -- "$1/overlays" "$1/variant"
+    local target="${!#}" name="${!###*/}" opt
+    if [[ -f "$TEST_DIR/mount-path" && "$target" == "$(cat "$TEST_DIR/mount-path")" ]]; then
+        cp -a "$target/." "$TEST_DIR/boot/"
+        rm -rf -- "$target/overlays" "$target/variant"
+        return 0
     fi
+    [[ -f "$TEST_DIR/mounted-$name" ]] || return 32
+    for opt in "$@"; do
+        if [[ "$opt" == -l || "$opt" == -f ]]; then
+            printf '%s %s\n' "$opt" "$name" >> "$TEST_DIR/umount-log"
+            rm -f "$TEST_DIR/mounted-$name"
+            return 0
+        fi
+    done
+    if [[ -f "$TEST_DIR/busy-$name" ]]; then
+        echo "umount: $target: target is busy." >&2
+        return 32
+    fi
+    rm -f "$TEST_DIR/mounted-$name"
 }
 "#,
     )
@@ -251,4 +280,47 @@ fn linux_cached_image_reaches_helper_read_only_and_nowhere_else() {
     assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"image data");
     let leaks = fs::read_to_string(dir.path().join("leaks")).unwrap_or_default();
     assert!(leaks.is_empty(), "image fd leaked to: {}", leaks.replace('\n', " "));
+}
+
+fn assert_aborted_before_writing(dir: &Path, output: &Output) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "flash must abort: {}", stderr);
+    assert!(stderr.contains("card in use:"), "missing busy marker: {}", stderr);
+    assert_eq!(fs::read(dir.join("disk")).unwrap(), b"untouched target");
+    assert!(!dir.join("events").exists(), "the writer ran");
+    let log = fs::read_to_string(dir.join("umount-log")).unwrap_or_default();
+    assert!(log.is_empty(), "lazy or forced unmount used: {}", log);
+}
+
+#[test]
+fn linux_busy_partition_aborts_before_writing() {
+    // A file manager holds the old BOOT partition: plain umount gets EBUSY.
+    // Detaching it (umount -l) leaves its superblock alive, and the later
+    // mount reused it with the old FAT geometry. Nothing may be written.
+    let dir = fixture();
+    fs::write(dir.path().join("mounted-disk1"), b"").unwrap();
+    fs::write(dir.path().join("busy-disk1"), b"").unwrap();
+    let output = flash(dir.path(), "", true);
+    assert_aborted_before_writing(dir.path(), &output);
+    assert!(dir.path().join("mounted-disk1").exists());
+}
+
+#[test]
+fn linux_partition_held_without_a_mountpoint_aborts_before_writing() {
+    // A superblock detached earlier is invisible to findmnt but still holds
+    // the partition. BLKRRPART reports it as EBUSY.
+    let dir = fixture();
+    fs::write(dir.path().join("held"), b"").unwrap();
+    let output = flash(dir.path(), "", true);
+    assert_aborted_before_writing(dir.path(), &output);
+}
+
+#[test]
+fn linux_idle_mounted_partition_is_unmounted_and_written() {
+    let dir = fixture();
+    fs::write(dir.path().join("mounted-disk1"), b"").unwrap();
+    let output = flash(dir.path(), "", true);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!dir.path().join("mounted-disk1").exists());
+    assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"image data");
 }

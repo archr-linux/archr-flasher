@@ -74,6 +74,7 @@
   "error_invalid_device": "Dispositivo selecionado inválido.",
   "error_write_protected": "O cartão está protegido contra gravação. Verifique a trava do adaptador SD.",
   "error_device_busy": "O cartão está em uso por outro programa. Feche qualquer janela que o mostre (e rode como administrador) e tente de novo.",
+  "error_card_in_use": "Feche o que estiver usando o cartão (gerenciador de arquivos, terminal) e tente de novo. Nada foi gravado.",
   "error_media": "Erro de mídia ao acessar o cartão. Ele pode estar com defeito — tente outro cartão SD.",
   "error_open_device": "Não foi possível abrir o dispositivo do cartão SD.",
   "overlay_sd": "Cartão SD",
