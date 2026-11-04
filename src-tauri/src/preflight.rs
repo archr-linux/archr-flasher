@@ -30,10 +30,6 @@ impl PreparedImage {
         Ok(Self { file, path, size, _temporary: None })
     }
 
-    pub fn open(path: &Path) -> Result<Self, String> {
-        Self::from_file(open_regular(path, "Image")?, path.to_path_buf())
-    }
-
     pub fn from_temp(temp: tempfile::NamedTempFile) -> Result<Self, String> {
         let (file, temporary) = temp.into_parts();
         let mut image = Self::from_file(file, temporary.to_path_buf())?;

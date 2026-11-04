@@ -1,10 +1,10 @@
 // Exercise the shipped Bash orchestration against regular files. All device,
 // service, mount and delay commands are functions scoped to the child shell.
 use super::FLASH_SCRIPT;
-use std::fs;
+use std::fs::{self, File};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn flash(dir: &Path, overlay: &str, verify: bool) -> Output {
     let script = dir.join("flash.sh");
@@ -50,10 +50,12 @@ set -e
 shift
 VERIFY=1
 if [[ "$1" == --no-verify ]]; then VERIFY=0; shift; fi
+# The image is stdin; $1 is only its identity.
+[[ "$1" == "$TEST_IMAGE_ID" ]]
 printf 'write\n' >> "$TEST_DIR/events"
-cat "$1" > "$2"
+cat > "$2"
 if [[ "$VERIFY" == 1 ]]; then
-    cmp "$1" "$2"
+    cmp "$TEST_DIR/source.img" "$2"
     printf 'verify\n' >> "$TEST_DIR/events"
 fi
 # Overlay must still be the default when write/verify completes.
@@ -62,9 +64,17 @@ cmp "$TEST_DIR/boot/overlays/mipi-panel.dtbo" "$TEST_DIR/default.dtbo"
     )
     .unwrap();
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let source = dir.join("source.img");
+    let (stdin, id) = match File::open(&source) {
+        Ok(file) => {
+            let id = crate::flashwrite::image_identity(&file).unwrap();
+            (Stdio::from(file), id)
+        }
+        Err(_) => (Stdio::null(), "missing".to_string()),
+    };
     Command::new("bash")
         .arg(script)
-        .arg(dir.join("source.img"))
+        .arg(&id)
         .arg(dir.join("disk"))
         .arg(overlay)
         .arg("original")
@@ -73,6 +83,8 @@ cmp "$TEST_DIR/boot/overlays/mipi-panel.dtbo" "$TEST_DIR/default.dtbo"
         .arg(if verify { "1" } else { "0" })
         .env("BASH_ENV", mocks)
         .env("TEST_DIR", dir)
+        .env("TEST_IMAGE_ID", &id)
+        .stdin(stdin)
         .env("TMPDIR", dir)
         .output()
         .unwrap()

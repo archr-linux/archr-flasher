@@ -61,10 +61,13 @@ fn flash_core_linux(
     ));
 
     // The GUI materialized and validated any archive in a private file.
-    // The privileged helper reopens it once at the process boundary, validates
-    // that descriptor and target capacity, then keeps it through the write.
-    let img_to_flash = &image.path;
+    // The privileged helper gets that same descriptor as stdin, never the
+    // pathname, plus its dev:ino:size identity. It revalidates the format and
+    // checks target capacity on the descriptor before writing.
     let image_size = image.size;
+    let image_id = crate::flashwrite::image_identity(&image.file)?;
+    let image_stdin = image.file.try_clone()
+        .map_err(|e| format!("Cannot pass image descriptor: {}", e))?;
 
     // Step 2: Write helper script to temp file
     let script_path = std::env::temp_dir().join("archr-flash.sh");
@@ -152,13 +155,14 @@ fn flash_core_linux(
     let child = cmd
         .arg("bash")
         .arg(&script_path)
-        .arg(img_to_flash.to_str().unwrap_or(""))
+        .arg(&image_id)
         .arg(device)
         .arg(custom_dtbo_path)
         .arg(variant)
         .arg(&progress_file)
         .arg(helper_path.to_str().unwrap_or(""))
         .arg(if verify { "1" } else { "0" })
+        .stdin(Stdio::from(image_stdin))
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to run pkexec: {}", e))?;
@@ -245,7 +249,11 @@ const FLASH_SCRIPT: &str = r#"#!/bin/bash
 set -eE
 trap 'echo "Script error at line $LINENO: $BASH_COMMAND" >&2' ERR
 
-IMAGE="$1"
+# The image is stdin: the descriptor the GUI validated. $1 is only its
+# dev:ino:size identity, rechecked by the helper. Move it to fd 3 so no
+# command below can consume it, and give everything else /dev/null.
+IMAGE_ID="$1"
+exec 3<&0 </dev/null
 DEVICE="$2"
 CUSTOM_DTBO="$3"
 VARIANT="$4"
@@ -257,14 +265,14 @@ VERIFY="$7"   # "1" = run the SHA-256 verify pass, "0" = skip it
 # this preamble lets the maintainer correlate "what was the input?"
 # without depending on the UI capturing the full stderr stream.
 echo "=== flash.sh start $(date -u +%FT%TZ) ===" >&2
-echo "  IMAGE   = $IMAGE" >&2
+echo "  IMAGE   = $IMAGE_ID (stdin)" >&2
 echo "  DEVICE  = $DEVICE" >&2
 echo "  VARIANT = $VARIANT" >&2
 echo "  CUSTOM_DTBO = $CUSTOM_DTBO" >&2
 echo "  HELPER  = $HELPER" >&2
 
-if [ ! -f "$IMAGE" ] || [ ! -r "$IMAGE" ]; then
-    echo "dd failed: source image missing or unreadable at $IMAGE" >&2
+if [ ! -f /dev/fd/3 ] || [ ! -r /dev/fd/3 ]; then
+    echo "dd failed: source image descriptor is not a readable regular file" >&2
     exit 1
 fi
 # Repeat source validation after elevation, before unmounting or writing.
@@ -281,7 +289,7 @@ if [ ! -x "$HELPER" ]; then
     echo "dd failed: native write helper missing or not executable at $HELPER" >&2
     exit 1
 fi
-echo "  IMAGE size = $(stat -c%s "$IMAGE") bytes" >&2
+echo "  IMAGE size = $(stat -L -c%s /dev/fd/3) bytes" >&2
 echo "  DEVICE size = $(blockdev --getsize64 "$DEVICE" 2>/dev/null || echo unknown) bytes" >&2
 
 # Recreate progress file as root (fs.protected_regular=2 on Ubuntu blocks
@@ -417,7 +425,7 @@ fi
 # environment and FUSE may be unavailable or denied there. Harmless
 # for a plain binary helper (.deb/.rpm installs), which ignores it.
 export APPIMAGE_EXTRACT_AND_RUN=1
-"$HELPER" __flash-write "${HELPER_ARGS[@]}" "$IMAGE" "$DEVICE" "$PROGRESS_FILE"
+"$HELPER" __flash-write "${HELPER_ARGS[@]}" "$IMAGE_ID" "$DEVICE" "$PROGRESS_FILE" <&3
 HELPER_RC=$?
 
 if [ "$HELPER_RC" -ne 0 ]; then

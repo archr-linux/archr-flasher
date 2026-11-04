@@ -34,7 +34,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
-use std::path::Path;
 use std::time::Instant;
 use sha2::{Sha256, Digest};
 
@@ -114,6 +113,31 @@ const O_DIRECT: i32 = 0x4000;                     // not exported by libc on eve
 /// `__flash-write` token (image, device, progress_file, plus an
 /// optional `--no-verify` anywhere). Returns the process exit code.
 pub fn entry(args: &[String]) -> i32 {
+    // The image arrives as stdin, opened and validated by the GUI. pkexec
+    // keeps fds 0-2 (it marks only fds >= 3 close-on-exec) and so does
+    // systemd-inhibit. Reading the descriptor instead of reopening a path
+    // binds the write to the exact file the GUI validated.
+    use std::os::fd::AsFd;
+    let image = match std::io::stdin().as_fd().try_clone_to_owned() {
+        Ok(fd) => File::from(fd),
+        Err(e) => {
+            eprintln!("flash error: cannot take image descriptor from stdin: {}", e);
+            return 1;
+        }
+    };
+    entry_with_image(image, args)
+}
+
+/// Identity of the validated image, passed on the helper's command line and
+/// rechecked against the received descriptor: device, inode and length.
+pub fn image_identity(file: &File) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata().map_err(|e| format!("Cannot stat image: {}", e))?;
+    Ok(format!("{}:{}:{}", meta.dev(), meta.ino(), meta.len()))
+}
+
+/// `entry` with the image descriptor supplied by the caller (tests use it).
+pub fn entry_with_image(image: File, args: &[String]) -> i32 {
     // `--no-verify` may appear anywhere among the args. The three
     // positional args (image, device, progress_file) keep the same
     // order. rpi-imager exposes the same toggle on the CLI as
@@ -124,20 +148,20 @@ pub fn entry(args: &[String]) -> i32 {
         .filter(|a| !a.starts_with("--"))
         .collect();
     if positional.len() < 3 {
-        eprintln!("usage: archr-flasher __flash-write [--no-verify] <image> <device> <progress_file>");
+        eprintln!("usage: archr-flasher __flash-write [--no-verify] <image-id> <device> <progress_file> < image");
         return 2;
     }
-    let image_path = positional[0];
+    let image_id = positional[0];
     let device_path = positional[1];
     let progress_path = positional[2];
 
     eprintln!("=== archr-flash-write start ===");
-    eprintln!("  image    = {}", image_path);
+    eprintln!("  image id = {}", image_id);
     eprintln!("  device   = {}", device_path);
     eprintln!("  progress = {}", progress_path);
     eprintln!("  verify   = {}", if verify_enabled { "yes" } else { "no" });
 
-    if let Err(e) = run(image_path, device_path, progress_path, verify_enabled) {
+    if let Err(e) = run(image, image_id, device_path, progress_path, verify_enabled) {
         eprintln!("flash error: {}", e);
         return 1;
     }
@@ -152,14 +176,19 @@ fn write_progress(path: &str, content: &str) {
 }
 
 fn run(
-    image_path: &str,
+    image: File,
+    image_id: &str,
     device_path: &str,
     progress_path: &str,
     verify_enabled: bool,
 ) -> Result<(), String> {
-    // This process boundary has its own preflight. Open once and retain the
-    // validated descriptor instead of checking a path and reopening it later.
-    let mut image = crate::preflight::PreparedImage::open(Path::new(image_path))?;
+    // This process boundary has its own preflight, on the received
+    // descriptor: regular file, size, MBR. The identity check proves it is
+    // the file the GUI validated, not a lookalike passed by mistake.
+    if image_identity(&image)? != image_id {
+        return Err(format!("image descriptor is not the validated image (expected {})", image_id));
+    }
+    let mut image = crate::preflight::PreparedImage::from_file(image, "<stdin>".into())?;
     let image_size = image.size;
 
     // Open the device O_DIRECT if possible. O_DIRECT bypasses the page

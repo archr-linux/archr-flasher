@@ -9,7 +9,8 @@ fn patch_boot_partition(image: &Path, dtbo: &Path, variant: &str) -> Result<(), 
 }
 
 fn write_image_to_raw_fd(dev: &mut File, path: &Path, size: Option<u64>, progress: impl FnMut(u64)) -> Result<crate::rawwrite_unix::WriteOutcome, String> {
-    let mut image = PreparedImage::open(path)?;
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mut image = PreparedImage::from_file(file, path.to_path_buf())?;
     write_prepared(dev, &mut image, size, progress)
 }
 
@@ -180,8 +181,7 @@ fn linux_native_writer_verifies_file_target_without_wiping_unused_tail() {
     crate::test_support::valid_image(&image, 16 * 1024 * 1024 + 512);
     let bytes = fs::read(&image).unwrap();
     fs::write(&target, vec![0xa5; 20 * 1024 * 1024]).unwrap();
-    let args = [&image, &target, &progress].map(|p| p.to_string_lossy().into_owned());
-    assert_eq!(crate::flashwrite::entry(&args), 0);
+    assert_eq!(helper(&image, &target, &progress), 0);
     let written = fs::read(&target).unwrap();
     assert!(written[..bytes.len()] == bytes);
     assert_eq!(&written[written.len() - 1024..], &[0xa5; 1024]);
@@ -272,8 +272,11 @@ fn overlay_replacement_after_validation_cannot_change_staged_bytes() {
 // ---------------------------------------------------------------------------
 
 fn helper(image: &Path, target: &Path, progress: &Path) -> i32 {
-    let args = [image, target, progress].map(|p| p.to_string_lossy().into_owned());
-    crate::flashwrite::entry(&args)
+    // As the GUI does: open once, pass that descriptor and its identity.
+    let file = File::open(image).unwrap();
+    let id = crate::flashwrite::image_identity(&file).unwrap();
+    let args = [id, target.to_string_lossy().into_owned(), progress.to_string_lossy().into_owned()];
+    crate::flashwrite::entry_with_image(file, &args)
 }
 
 #[test]
@@ -362,4 +365,38 @@ fn compressed_retry_never_reuses_output_of_failed_decompression() {
         assert!(crate::image_cache::prepare(inputs.image, &archive, &cache).is_err());
         assert_eq!(fs::read_dir(&cache).unwrap().count(), 0, "failed output must be removed");
     }
+}
+
+#[test]
+fn linux_helper_writes_the_validated_image_even_if_its_path_is_replaced() {
+    // Validate A, then put B (also a valid ArchR layout) at the same path.
+    // The helper must write A, the file whose descriptor it was given.
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("selected.img");
+    let b = dir.path().join("replacement.img");
+    let target = dir.path().join("target.img");
+    let progress = dir.path().join("progress");
+    crate::test_support::valid_image(&a, 16 * 1024 * 1024);
+    crate::test_support::valid_image(&b, 16 * 1024 * 1024);
+    for (path, marker) in [(&a, b'A'), (&b, b'B')] {
+        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(1024)).unwrap();
+        file.write_all(&[marker]).unwrap();
+    }
+    let inputs = validate_flash_inputs(a.to_str().unwrap(), "").unwrap();
+    let prepared = PreparedImage::from_file(inputs.image, a.clone()).unwrap();
+    let id = crate::flashwrite::image_identity(&prepared.file).unwrap();
+    fs::rename(&b, &a).unwrap();
+    File::create(&target).unwrap().set_len(20 * 1024 * 1024).unwrap();
+    let args = [id.clone(), target.to_string_lossy().into_owned(), progress.to_string_lossy().into_owned()];
+    assert_eq!(crate::flashwrite::entry_with_image(prepared.file.try_clone().unwrap(), &args), 0);
+    let written = fs::read(&target).unwrap();
+    assert_eq!(written[1024], b'A', "helper wrote the replacement, not the validated image");
+
+    // A descriptor that is not the validated file is refused before any write.
+    let original = vec![0xa5; 20 * 1024 * 1024];
+    fs::write(&target, &original).unwrap();
+    let other = File::open(&a).unwrap(); // now B
+    assert_ne!(crate::flashwrite::entry_with_image(other, &args), 0);
+    assert!(fs::read(&target).unwrap() == original);
 }
