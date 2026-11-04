@@ -136,6 +136,29 @@ pub fn image_identity(file: &File) -> Result<String, String> {
     Ok(format!("{}:{}:{}", meta.dev(), meta.ino(), meta.len()))
 }
 
+/// A read-only descriptor for the same open file. The decompressed cache is
+/// a NamedTempFile opened O_RDWR, and dup() would keep write access. Reopening
+/// the fd's /proc magic link (never the user's pathname) yields a new
+/// O_RDONLY open file description of the same inode; the identity check
+/// confirms that, and the helper refuses any stdin that is not O_RDONLY.
+pub fn read_only_descriptor(file: &File) -> Result<File, String> {
+    let reopened = File::open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        .map_err(|e| format!("Cannot reopen image read-only: {}", e))?;
+    if image_identity(&reopened)? != image_identity(file)? {
+        return Err("Read-only image descriptor does not match the validated image".into());
+    }
+    Ok(reopened)
+}
+
+fn is_read_only(file: &File) -> Result<bool, String> {
+    // SAFETY: F_GETFL only reads the status flags of a descriptor we own.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(format!("Cannot read image descriptor flags: {}", std::io::Error::last_os_error()));
+    }
+    Ok(flags & libc::O_ACCMODE == libc::O_RDONLY)
+}
+
 /// `entry` with the image descriptor supplied by the caller (tests use it).
 pub fn entry_with_image(image: File, args: &[String]) -> i32 {
     // `--no-verify` may appear anywhere among the args. The three
@@ -187,6 +210,9 @@ fn run(
     // the file the GUI validated, not a lookalike passed by mistake.
     if image_identity(&image)? != image_id {
         return Err(format!("image descriptor is not the validated image (expected {})", image_id));
+    }
+    if !is_read_only(&image)? {
+        return Err("image descriptor must be read-only".into());
     }
     let mut image = crate::preflight::PreparedImage::from_file(image, "<stdin>".into())?;
     let image_size = image.size;

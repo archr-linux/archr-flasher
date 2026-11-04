@@ -400,3 +400,22 @@ fn linux_helper_writes_the_validated_image_even_if_its_path_is_replaced() {
     assert_ne!(crate::flashwrite::entry_with_image(other, &args), 0);
     assert!(fs::read(&target).unwrap() == original);
 }
+
+#[test]
+fn linux_helper_refuses_a_writable_image_descriptor() {
+    // The decompressed cache is opened O_RDWR. The helper must refuse it
+    // unless the GUI handed over the read-only reopening.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.img");
+    let progress = dir.path().join("progress");
+    let cached = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+    crate::test_support::valid_image(cached.path(), 16 * 1024 * 1024);
+    let original = vec![0xa5; 20 * 1024 * 1024];
+    fs::write(&target, &original).unwrap();
+    let id = crate::flashwrite::image_identity(cached.as_file()).unwrap();
+    let args = [id, target.to_string_lossy().into_owned(), progress.to_string_lossy().into_owned()];
+    assert_ne!(crate::flashwrite::entry_with_image(cached.as_file().try_clone().unwrap(), &args), 0);
+    assert!(fs::read(&target).unwrap() == original);
+    let read_only = crate::flashwrite::read_only_descriptor(cached.as_file()).unwrap();
+    assert_eq!(crate::flashwrite::entry_with_image(read_only, &args), 0);
+}

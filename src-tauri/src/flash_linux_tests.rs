@@ -7,6 +7,11 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn flash(dir: &Path, overlay: &str, verify: bool) -> Output {
+    let image = File::open(dir.join("source.img")).ok();
+    flash_with(dir, overlay, verify, image)
+}
+
+fn flash_with(dir: &Path, overlay: &str, verify: bool, image: Option<File>) -> Output {
     let script = dir.join("flash.sh");
     fs::write(&script, FLASH_SCRIPT).unwrap();
     let mocks = dir.join("mocks.sh");
@@ -21,12 +26,16 @@ fn flash(dir: &Path, overlay: &str, verify: bool) -> Output {
     done
     builtin test "${args[@]}"
 }
-# Probe: a separate process that tries to read the image through fd 3.
-# Opening /proc/self/fd/3 gives it its own offset, so it cannot disturb
-# the helper's stream. Any hit is recorded in $TEST_DIR/leaks.
+# Probe: a separate process that tries to read the image through fd 3
+# (via /proc/self/fd/3, its own offset, so the helper's stream is not
+# disturbed) and to write through the inherited fd 3 itself. Any success
+# is recorded in $TEST_DIR/leaks.
 probe() {
     if /bin/bash -c 'head -c1 /proc/self/fd/3 >/dev/null 2>&1'; then
-        printf '%s\n' "$1" >> "$TEST_DIR/leaks"
+        printf '%s:read\n' "$1" >> "$TEST_DIR/leaks"
+    fi
+    if /bin/bash -c 'printf Z >&3' 2>/dev/null; then
+        printf '%s:write\n' "$1" >> "$TEST_DIR/leaks"
     fi
 }
 date() { probe date; command date "$@"; }
@@ -62,7 +71,10 @@ VERIFY=1
 if [[ "$1" == --no-verify ]]; then VERIFY=0; shift; fi
 # The image is stdin; $1 is only its identity. fd 3 must be closed here too.
 [[ "$1" == "$TEST_IMAGE_ID" ]]
-if [[ -e /proc/$$/fd/3 ]]; then printf 'helper\n' >> "$TEST_DIR/leaks"; fi
+if [[ -e /proc/$$/fd/3 ]]; then printf 'helper:fd3\n' >> "$TEST_DIR/leaks"; fi
+# Its stdin must be read-only (access mode bits of fdinfo flags are 0).
+flags=$(awk '/^flags:/ {print $2}' /proc/$$/fdinfo/0)
+if (( (8#$flags & 3) != 0 )); then printf 'helper:stdin-writable\n' >> "$TEST_DIR/leaks"; fi
 printf 'write\n' >> "$TEST_DIR/events"
 cat > "$2"
 if [[ "$VERIFY" == 1 ]]; then
@@ -75,13 +87,12 @@ cmp "$TEST_DIR/boot/overlays/mipi-panel.dtbo" "$TEST_DIR/default.dtbo"
     )
     .unwrap();
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
-    let source = dir.join("source.img");
-    let (stdin, id) = match File::open(&source) {
-        Ok(file) => {
+    let (stdin, id) = match image {
+        Some(file) => {
             let id = crate::flashwrite::image_identity(&file).unwrap();
             (Stdio::from(file), id)
         }
-        Err(_) => (Stdio::null(), "missing".to_string()),
+        None => (Stdio::null(), "missing".to_string()),
     };
     Command::new("bash")
         .arg(script)
@@ -220,6 +231,23 @@ fn linux_image_descriptor_reaches_only_the_helper() {
     let dir = fixture();
     let output = flash(dir.path(), "", true);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"image data");
+    let leaks = fs::read_to_string(dir.path().join("leaks")).unwrap_or_default();
+    assert!(leaks.is_empty(), "image fd leaked to: {}", leaks.replace('\n', " "));
+}
+
+#[test]
+fn linux_cached_image_reaches_helper_read_only_and_nowhere_else() {
+    // A decompressed image is a NamedTempFile opened O_RDWR. What reaches
+    // pkexec must be read-only, and still only the helper may see it.
+    let dir = fixture();
+    let mut cached = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+    std::io::Write::write_all(cached.as_file_mut(), b"image data").unwrap();
+    std::io::Seek::rewind(cached.as_file_mut()).unwrap();
+    let stdin = crate::flashwrite::read_only_descriptor(cached.as_file()).unwrap();
+    let output = flash_with(dir.path(), "", true, Some(stdin));
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(fs::read(cached.path()).unwrap(), b"image data", "image was modified");
     assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"image data");
     let leaks = fs::read_to_string(dir.path().join("leaks")).unwrap_or_default();
     assert!(leaks.is_empty(), "image fd leaked to: {}", leaks.replace('\n', " "));

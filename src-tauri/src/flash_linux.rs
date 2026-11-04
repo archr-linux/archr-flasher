@@ -66,8 +66,8 @@ fn flash_core_linux(
     // checks target capacity on the descriptor before writing.
     let image_size = image.size;
     let image_id = crate::flashwrite::image_identity(&image.file)?;
-    let image_stdin = image.file.try_clone()
-        .map_err(|e| format!("Cannot pass image descriptor: {}", e))?;
+    // Read-only, even when the image is the O_RDWR decompression temp file.
+    let image_stdin = crate::flashwrite::read_only_descriptor(&image.file)?;
 
     // Step 2: Write helper script to temp file
     let script_path = std::env::temp_dir().join("archr-flash.sh");
