@@ -187,6 +187,64 @@ mod tests {
         assert!(validate_flash_inputs(image.to_str().unwrap(), "").is_err());
     }
 
+    /// Sparse disk with the given MBR entries: (type, start, sectors).
+    fn layout(dir: &Path, size: u64, parts: &[(u8, u32, u32)]) -> PathBuf {
+        let path = dir.join("layout.img");
+        let mut file = File::create(&path).unwrap();
+        file.set_len(size).unwrap();
+        let mut mbr = [0u8; 512];
+        for (index, (kind, start, count)) in parts.iter().enumerate() {
+            let entry = &mut mbr[446 + index * 16..462 + index * 16];
+            entry[4] = *kind;
+            entry[8..12].copy_from_slice(&start.to_le_bytes());
+            entry[12..16].copy_from_slice(&count.to_le_bytes());
+        }
+        mbr[510..512].copy_from_slice(&[0x55, 0xaa]);
+        std::io::Write::write_all(&mut file, &mbr).unwrap();
+        path
+    }
+
+    fn check(path: &Path) -> Result<u64, String> {
+        validate_image_file(&mut File::open(path).unwrap())
+    }
+
+    #[test]
+    fn accepts_current_and_legacy_mkimage_layouts() {
+        let dir = tempfile::tempdir().unwrap();
+        // R36S 20261104 release: FAT32 boot, hidden 0xDA root, ext4 storage,
+        // plus the 1 MiB tail mkimage reserves. Sparse, so no real 5 GB write.
+        let real = layout(dir.path(), 5_151_653_888, &[(0x0c, 32768, 524288), (0xda, 557056, 9437184), (0x83, 9994240, 65536)]);
+        assert_eq!(check(&real).unwrap(), 5_151_653_888);
+        let visible_root = layout(dir.path(), 64 << 20, &[(0x0c, 2048, 32768), (0x83, 34816, 32768), (0x83, 67584, 4096)]);
+        assert!(check(&visible_root).is_ok());
+        let legacy = layout(dir.path(), 64 << 20, &[(0x0b, 32768, 65536), (0x83, 98304, 4096)]);
+        assert!(check(&legacy).is_ok());
+    }
+
+    #[test]
+    fn rejects_incoherent_partition_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let size = 64 << 20;
+        for parts in [
+            &[(0x0c, 2048, 32768), (0x83, 30000, 32768), (0x83, 67584, 4096)][..], // overlap
+            &[(0x0c, 2048, 32768), (0xda, 34816, 32768), (0x83, 67584, 999_999)], // past EOF
+            &[(0x0c, 0, 32768), (0x83, 34816, 4096)],                             // over MBR
+            &[(0x07, 2048, 32768), (0x83, 34816, 4096)],                          // NTFS boot
+            &[(0x0c, 2048, 32768)],                                               // boot only
+            &[(0x0c, 2048, 32768), (0, 0, 0), (0x83, 67584, 4096)],              // hole
+        ] {
+            assert!(check(&layout(dir.path(), size, parts)).is_err(), "{:?}", parts);
+        }
+        // Valid table but missing 0x55AA, or a size not a multiple of 512.
+        let path = layout(dir.path(), size, &[(0x0c, 2048, 32768), (0x83, 34816, 4096)]);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[511] = 0;
+        fs::write(&path, &bytes).unwrap();
+        assert!(check(&path).is_err());
+        let path = layout(dir.path(), size + 1, &[(0x0c, 2048, 32768), (0x83, 34816, 4096)]);
+        assert!(check(&path).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn unreadable_selected_overlay_fails_before_writing() {

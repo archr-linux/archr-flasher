@@ -265,3 +265,101 @@ fn overlay_replacement_after_validation_cannot_change_staged_bytes() {
     let staged = crate::preflight::stage_overlay(inputs.overlay).unwrap().unwrap();
     assert_eq!(fs::read(staged.path()).unwrap(), b"validated");
 }
+
+// ---------------------------------------------------------------------------
+// Regressions from the external review probes. Each reproduces a case that
+// fa9d0de accepted; every target here is a regular file, never a device.
+// ---------------------------------------------------------------------------
+
+fn helper(image: &Path, target: &Path, progress: &Path) -> i32 {
+    let args = [image, target, progress].map(|p| p.to_string_lossy().into_owned());
+    crate::flashwrite::entry(&args)
+}
+
+#[test]
+fn helper_rejects_one_byte_image_before_touching_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("corrupt.img");
+    let target = dir.path().join("target.img");
+    let original = vec![0xa5; 3 * 1024 * 1024];
+    fs::write(&image, [0x42]).unwrap();
+    fs::write(&target, &original).unwrap();
+    assert!(validate_flash_inputs(image.to_str().unwrap(), "").is_err());
+    assert_ne!(helper(&image, &target, &dir.path().join("progress")), 0);
+    assert!(fs::read(&target).unwrap() == original);
+}
+
+#[test]
+fn helper_rejects_image_without_archr_partition_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("plain.img");
+    let target = dir.path().join("target.img");
+    // Right size and alignment, valid signature, but no partitions.
+    let mut bytes = vec![0u8; 16 * 1024 * 1024];
+    bytes[510] = 0x55;
+    bytes[511] = 0xaa;
+    fs::write(&image, &bytes).unwrap();
+    let original = vec![0xa5; 20 * 1024 * 1024];
+    fs::write(&target, &original).unwrap();
+    assert_ne!(helper(&image, &target, &dir.path().join("progress")), 0);
+    assert!(fs::read(&target).unwrap() == original);
+}
+
+#[test]
+fn helper_rejects_image_larger_than_target_before_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("image.img");
+    let target = dir.path().join("small-target.img");
+    crate::test_support::valid_image(&image, 16 * 1024 * 1024);
+    let original = vec![0xa5; 3 * 1024 * 1024];
+    fs::write(&target, &original).unwrap();
+    assert_ne!(helper(&image, &target, &dir.path().join("progress")), 0);
+    // A file-backed target must not have been extended or overwritten.
+    assert!(fs::read(&target).unwrap() == original);
+}
+
+#[test]
+fn rawwriter_rejects_unknown_capacity_of_non_file_target() {
+    // A capacity the writer cannot determine is a refusal, not "assume it fits".
+    assert!(crate::preflight::validate_capacity(16 * 1024 * 1024, None, 512).is_err());
+    assert!(crate::preflight::validate_capacity(16 * 1024 * 1024, Some(16 * 1024 * 1024), 512).is_ok());
+    assert!(crate::preflight::validate_capacity(16 * 1024 * 1024, Some(16 * 1024 * 1024 - 512), 512).is_err());
+    // O_DIRECT pads the tail to 4 KiB; that padding must also fit.
+    assert!(crate::preflight::validate_capacity(16 * 1024 * 1024 + 512, Some(16 * 1024 * 1024 + 512), 4096).is_err());
+}
+
+#[test]
+fn image_truncated_after_preflight_does_not_touch_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = boot_image(dir.path());
+    let inputs = validate_flash_inputs(image.to_str().unwrap(), "").unwrap();
+    let mut prepared = PreparedImage::from_file(inputs.image, image.clone()).unwrap();
+    // Same inode, changed in place: the retained descriptor must notice.
+    OpenOptions::new().write(true).open(&image).unwrap().set_len(1).unwrap();
+    let target = dir.path().join("target.img");
+    let original = vec![0xa5; 45 * 1024 * 1024];
+    fs::write(&target, &original).unwrap();
+    let mut dev = OpenOptions::new().read(true).write(true).open(&target).unwrap();
+    assert!(write_prepared(&mut dev, &mut prepared, Some(original.len() as u64), |_| {}).is_err());
+    assert!(fs::read(&target).unwrap() == original, "no wipe before a successful first read");
+}
+
+#[test]
+fn compressed_retry_never_reuses_output_of_failed_decompression() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = dir.path().join("raw.img");
+    crate::test_support::valid_image(&raw, 16 * 1024 * 1024);
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(&fs::read(&raw).unwrap()).unwrap();
+    let mut bytes = enc.finish().unwrap();
+    let crc_at = bytes.len() - 8;
+    bytes[crc_at] ^= 1;
+    let archive = dir.path().join("corrupt.img.gz");
+    fs::write(&archive, &bytes).unwrap();
+    let cache = dir.path().join("cache");
+    for _ in 0..2 {
+        let inputs = validate_flash_inputs(archive.to_str().unwrap(), "").unwrap();
+        assert!(crate::image_cache::prepare(inputs.image, &archive, &cache).is_err());
+        assert_eq!(fs::read_dir(&cache).unwrap().count(), 0, "failed output must be removed");
+    }
+}
