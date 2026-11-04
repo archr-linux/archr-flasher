@@ -250,10 +250,16 @@ set -eE
 trap 'echo "Script error at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # The image is stdin: the descriptor the GUI validated. $1 is only its
-# dev:ino:size identity, rechecked by the helper. Move it to fd 3 so no
-# command below can consume it, and give everything else /dev/null.
+# dev:ino:size identity, rechecked by the helper. Park it on fd 3 and give
+# the script /dev/null as stdin. fd 3 is closed for every command except
+# the helper: the preparation runs in a { } 3<&- block, the helper gets it
+# as stdin with 3<&-, and the script closes it right after the helper.
 IMAGE_ID="$1"
 exec 3<&0 </dev/null
+if [ ! -f /dev/fd/3 ] || [ ! -r /dev/fd/3 ]; then
+    echo "dd failed: source image descriptor is not a readable regular file" >&2
+    exit 1
+fi
 DEVICE="$2"
 CUSTOM_DTBO="$3"
 VARIANT="$4"
@@ -261,6 +267,7 @@ PROGRESS_FILE="$5"
 HELPER="$6"
 VERIFY="$7"   # "1" = run the SHA-256 verify pass, "0" = skip it
 
+{
 # Up-front diagnostics. When the script aborts later for any reason,
 # this preamble lets the maintainer correlate "what was the input?"
 # without depending on the UI capturing the full stderr stream.
@@ -271,10 +278,6 @@ echo "  VARIANT = $VARIANT" >&2
 echo "  CUSTOM_DTBO = $CUSTOM_DTBO" >&2
 echo "  HELPER  = $HELPER" >&2
 
-if [ ! -f /dev/fd/3 ] || [ ! -r /dev/fd/3 ]; then
-    echo "dd failed: source image descriptor is not a readable regular file" >&2
-    exit 1
-fi
 # Repeat source validation after elevation, before unmounting or writing.
 # Empty CUSTOM_DTBO means retain the image's panel configuration.
 if [ -n "$CUSTOM_DTBO" ] && { [ ! -f "$CUSTOM_DTBO" ] || [ ! -r "$CUSTOM_DTBO" ]; }; then
@@ -289,7 +292,6 @@ if [ ! -x "$HELPER" ]; then
     echo "dd failed: native write helper missing or not executable at $HELPER" >&2
     exit 1
 fi
-echo "  IMAGE size = $(stat -L -c%s /dev/fd/3) bytes" >&2
 echo "  DEVICE size = $(blockdev --getsize64 "$DEVICE" 2>/dev/null || echo unknown) bytes" >&2
 
 # Recreate progress file as root (fs.protected_regular=2 on Ubuntu blocks
@@ -403,6 +405,7 @@ blockdev --flushbufs "$DEVICE" 2>/dev/null || true
 # controllers implicated above. The current Windows/macOS writers also have
 # no speed pre-pass. Do not emit a synthetic speed_ok result with zero MB/s.
 echo "STAGE:writing" > "$PROGRESS_FILE"
+} 3<&-
 
 # === WRITE + VERIFY (native helper) ===
 # The previous version invoked `dd if=$IMAGE of=$DEVICE oflag=dsync
@@ -425,8 +428,9 @@ fi
 # environment and FUSE may be unavailable or denied there. Harmless
 # for a plain binary helper (.deb/.rpm installs), which ignores it.
 export APPIMAGE_EXTRACT_AND_RUN=1
-"$HELPER" __flash-write "${HELPER_ARGS[@]}" "$IMAGE_ID" "$DEVICE" "$PROGRESS_FILE" <&3
-HELPER_RC=$?
+HELPER_RC=0
+"$HELPER" __flash-write "${HELPER_ARGS[@]}" "$IMAGE_ID" "$DEVICE" "$PROGRESS_FILE" <&3 3<&- || HELPER_RC=$?
+exec 3<&-
 
 if [ "$HELPER_RC" -ne 0 ]; then
     # "dd failed:" prefix kept for the Rust matcher in flash.rs.

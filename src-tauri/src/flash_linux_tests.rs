@@ -21,14 +21,24 @@ fn flash(dir: &Path, overlay: &str, verify: bool) -> Output {
     done
     builtin test "${args[@]}"
 }
-systemctl() { return 1; }
+# Probe: a separate process that tries to read the image through fd 3.
+# Opening /proc/self/fd/3 gives it its own offset, so it cannot disturb
+# the helper's stream. Any hit is recorded in $TEST_DIR/leaks.
+probe() {
+    if /bin/bash -c 'head -c1 /proc/self/fd/3 >/dev/null 2>&1'; then
+        printf '%s\n' "$1" >> "$TEST_DIR/leaks"
+    fi
+}
+date() { probe date; command date "$@"; }
+systemctl() { probe systemctl; return 1; }
 blockdev() { if [[ "$1" == --getsize64 ]]; then stat -c%s "$2"; fi; }
-udisksctl() { return 0; }
-partprobe() { return 0; }
+udisksctl() { probe udisksctl; return 0; }
+partprobe() { probe partprobe; return 0; }
 sleep() { return 0; }
-sync() { return 0; }
+sync() { probe sync; return 0; }
 eject() { return 0; }
 mount() {
+    probe mount
     cp -a "$TEST_DIR/boot/." "$2/"
     printf '%s' "$2" > "$TEST_DIR/mount-path"
 }
@@ -50,8 +60,9 @@ set -e
 shift
 VERIFY=1
 if [[ "$1" == --no-verify ]]; then VERIFY=0; shift; fi
-# The image is stdin; $1 is only its identity.
+# The image is stdin; $1 is only its identity. fd 3 must be closed here too.
 [[ "$1" == "$TEST_IMAGE_ID" ]]
+if [[ -e /proc/$$/fd/3 ]]; then printf 'helper\n' >> "$TEST_DIR/leaks"; fi
 printf 'write\n' >> "$TEST_DIR/events"
 cat > "$2"
 if [[ "$VERIFY" == 1 ]]; then
@@ -199,4 +210,17 @@ fn linux_skip_overlay_also_succeeds_without_verify() {
         fs::read(dir.path().join("boot/overlays/mipi-panel.dtbo")).unwrap(),
         b"default"
     );
+}
+
+#[test]
+fn linux_image_descriptor_reaches_only_the_helper() {
+    // Probes replace date, systemctl (also run by the EXIT trap), udisksctl,
+    // partprobe, mount and sync, before and after the write. None of them
+    // may read the image through the fd the script holds for the helper.
+    let dir = fixture();
+    let output = flash(dir.path(), "", true);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"image data");
+    let leaks = fs::read_to_string(dir.path().join("leaks")).unwrap_or_default();
+    assert!(leaks.is_empty(), "image fd leaked to: {}", leaks.replace('\n', " "));
 }
