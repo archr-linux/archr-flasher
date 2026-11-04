@@ -279,12 +279,35 @@ fn mtools_file(card: &Path, name: &str) -> Option<Vec<u8>> {
     Some(out.stdout)
 }
 
+/// fsck.fat -n on the boot FAT of an image, when dosfstools is installed.
+/// Returns its report; panics on any error it finds.
+fn fsck_boot(image: &Path) -> Option<String> {
+    let bytes = fs::read(image).unwrap();
+    let boot = &bytes[ARCHR_BOOT_START as usize..][..crate::test_support::ARCHR_BOOT_SIZE as usize];
+    let dir = tempfile::tempdir().unwrap();
+    let slice = dir.path().join("boot.fat");
+    fs::write(&slice, boot).unwrap();
+    let out = Command::new("fsck.fat").arg("-n").arg("-v").arg(&slice).output().ok()?;
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "fsck.fat found errors: {}", text);
+    // Only the expected below-minimum warning may follow the summary.
+    let summary = text.find(" files, ").expect("fsck.fat summary");
+    let before = &text[..summary];
+    for marker in ["share clusters", "Bad short file name", "Expected a valid", "Deleting", "Truncating", "should be", "uninitialized"] {
+        assert!(!before.contains(marker), "fsck.fat: {} in {}", marker, text);
+    }
+    Some(text)
+}
+
 fn assert_card_configured(card: &Path, source: &Path, dtbo: &[u8]) {
+    fsck_boot(card);
     // Geometry of the written boot FAT is the image's: 16 KiB clusters.
     let bytes = fs::read(card).unwrap();
     let bpb = &bytes[ARCHR_BOOT_START as usize..][..512];
-    let cluster = u16::from_le_bytes([bpb[11], bpb[12]]) as u32 * bpb[13] as u32;
+    let (fat32, cluster, clusters) = crate::test_support::fat_geometry(bpb);
+    assert!(fat32, "boot FAT is not FAT32");
     assert_eq!(cluster, 16 * 1024, "boot FAT cluster size");
+    assert!(clusters < 65_525, "boot FAT must stay below the FAT32 cluster minimum: {}", clusters);
     let mut expected: Vec<(String, Vec<u8>)> = vec![
         ("overlays/mipi-panel.dtbo".into(), dtbo.to_vec()),
         ("variant".into(), b"soysauce".to_vec()),
@@ -388,5 +411,27 @@ fn linux_held_partition_aborts_in_every_user_locale() {
         assert!(stderr.contains("card in use:"), "LANG={}: {}", lang, stderr);
         assert_eq!(fs::read(dir.path().join("disk")).unwrap(), b"untouched target", "LANG={}", lang);
         assert!(!dir.path().join("events").exists(), "LANG={}: the writer ran", lang);
+    }
+}
+
+#[test]
+fn archr_fixture_is_fat32_with_the_shipped_geometry() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("archr.img");
+    archr_boot_image(&image);
+    let bytes = fs::read(&image).unwrap();
+    let boot = &bytes[ARCHR_BOOT_START as usize..][..crate::test_support::ARCHR_BOOT_SIZE as usize];
+    let (fat32, cluster, clusters) = crate::test_support::fat_geometry(&boot[..512]);
+    assert!(fat32, "fixture boot FAT is not FAT32");
+    assert_eq!(boot[13], crate::test_support::ARCHR_SECTORS_PER_CLUSTER);
+    assert_eq!(cluster, 16 * 1024);
+    assert!(clusters < 65_525, "{} clusters", clusters);
+    // Independent checker, when installed: dosfstools.
+    if let Some(report) = fsck_boot(&image) {
+        assert!(report.contains("32 bit entries"), "fsck.fat does not see FAT32: {}", report);
+        assert!(report.contains("16384 bytes per cluster"), "{}", report);
+    }
+    if let Some(kernel) = mtools_file(&image, "KERNEL") {
+        assert!(kernel == pattern(1, 300_000));
     }
 }
