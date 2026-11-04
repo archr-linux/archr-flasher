@@ -255,10 +255,11 @@ fn full_sync(f: &File) -> std::io::Result<()> {
 
 /// Install the panel overlay, variant marker and (for soysauce) the
 /// extlinux switch INSIDE the image file, before anything touches the
-/// card. This is how the macOS path configures the boot partition: the
-/// ArchR boot FAT is a below-spec-cluster-count FAT32 that the macOS
-/// msdos driver refuses to mount, so post-flash configuration through
-/// the OS is impossible there. Patching the image up front also means a
+/// card. This is how the macOS and Linux paths configure the boot
+/// partition. The ArchR boot FAT is a below-spec-cluster-count FAT32 that
+/// the macOS msdos driver refuses to mount. On Linux, mounting the freshly
+/// written card could reuse a stale vfat superblock of the previous card
+/// layout and corrupt the DTBs. Patching the image up front also means a
 /// subsequent verify pass covers the configuration bytes too. An empty
 /// `dtbo` path preserves the existing overlay, including its absence.
 pub fn patch_boot_partition(image: &mut File, dtbo: &Path, variant: &str) -> Result<(), String> {
@@ -275,33 +276,7 @@ pub fn patch_boot_partition(image: &mut File, dtbo: &Path, variant: &str) -> Res
     };
 
     let img = image;
-    img.seek(SeekFrom::Start(0))
-        .map_err(|e| format!("err:image_patch seeking image: {}", e))?;
-
-    // First MBR partition entry: status byte at 446, type at 446+4,
-    // start LBA (little endian u32) at 446+8, sector count at 446+12.
-    let mut mbr = [0u8; 512];
-    img.read_exact(&mut mbr)
-        .map_err(|e| format!("err:image_patch reading MBR: {}", e))?;
-    if mbr[510] != 0x55 || mbr[511] != 0xAA {
-        return Err("err:image_patch image has no MBR signature".into());
-    }
-    let entry = &mbr[446..462];
-    let ptype = entry[4];
-    // FAT32 LBA (0x0c) or FAT32 CHS (0x0b); everything ArchR ships uses 0x0c.
-    if ptype != 0x0c && ptype != 0x0b {
-        return Err(format!(
-            "err:image_patch first partition is not FAT32 (type 0x{:02x})",
-            ptype
-        ));
-    }
-    let start_lba = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as u64;
-    let num_sectors = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as u64;
-    if start_lba == 0 || num_sectors == 0 {
-        return Err("err:image_patch empty boot partition entry".into());
-    }
-    let part_start = start_lba * 512;
-    let part_end = part_start + num_sectors * 512;
+    let (part_start, part_end) = boot_partition_bounds(img)?;
 
     let slice = fscommon::StreamSlice::new(img, part_start, part_end)
         .map_err(|e| format!("err:image_patch slicing partition: {}", e))?;
@@ -370,4 +345,51 @@ pub fn patch_boot_partition(image: &mut File, dtbo: &Path, variant: &str) -> Res
     fs.unmount()
         .map_err(|e| format!("err:image_patch unmounting FAT: {}", e))?;
     Ok(())
+}
+
+/// Byte range of the boot FAT, the first MBR partition.
+fn boot_partition_bounds(img: &mut File) -> Result<(u64, u64), String> {
+    img.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("err:image_patch seeking image: {}", e))?;
+
+    // First MBR partition entry: status byte at 446, type at 446+4,
+    // start LBA (little endian u32) at 446+8, sector count at 446+12.
+    let mut mbr = [0u8; 512];
+    img.read_exact(&mut mbr)
+        .map_err(|e| format!("err:image_patch reading MBR: {}", e))?;
+    if mbr[510] != 0x55 || mbr[511] != 0xAA {
+        return Err("err:image_patch image has no MBR signature".into());
+    }
+    let entry = &mbr[446..462];
+    let ptype = entry[4];
+    // FAT32 LBA (0x0c) or FAT32 CHS (0x0b); everything ArchR ships uses 0x0c.
+    if ptype != 0x0c && ptype != 0x0b {
+        return Err(format!(
+            "err:image_patch first partition is not FAT32 (type 0x{:02x})",
+            ptype
+        ));
+    }
+    let start_lba = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as u64;
+    let num_sectors = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as u64;
+    if start_lba == 0 || num_sectors == 0 {
+        return Err("err:image_patch empty boot partition entry".into());
+    }
+    let part_start = start_lba * 512;
+    Ok((part_start, part_start + num_sectors * 512))
+}
+
+/// Read one file of the image's boot FAT, e.g. "overlays/mipi-panel.dtbo".
+/// Used to read back what patch_boot_partition wrote before trusting it.
+pub fn read_boot_file(image: &mut File, path: &str) -> Result<Vec<u8>, String> {
+    let (start, end) = boot_partition_bounds(image)?;
+    let slice = fscommon::StreamSlice::new(&mut *image, start, end)
+        .map_err(|e| format!("err:image_patch slicing partition: {}", e))?;
+    let fs = fatfs::FileSystem::new(slice, fatfs::FsOptions::new())
+        .map_err(|e| format!("err:image_patch opening FAT: {}", e))?;
+    let mut bytes = Vec::new();
+    fs.root_dir()
+        .open_file(path)
+        .and_then(|mut f| f.read_to_end(&mut bytes))
+        .map_err(|e| format!("err:image_patch reading back {}: {}", path, e))?;
+    Ok(bytes)
 }
