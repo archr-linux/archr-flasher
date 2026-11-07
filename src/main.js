@@ -29,7 +29,7 @@ async function initI18n() {
 
 function t(key, rep) {
   let s = lang[key] || key;
-  if (rep) for (const [k, v] of Object.entries(rep)) s = s.replace(`{${k}}`, v);
+  if (rep) for (const [k, v] of Object.entries(rep)) s = s.split(`{${k}}`).join(v);
   return s;
 }
 
@@ -232,6 +232,7 @@ document.querySelectorAll('#page-console .card').forEach(card => {
 
     if (changed) {
       imagePath = null;
+      setImageStatus('');
       $('image-name').textContent = t('no_image');
       $('image-version').textContent = '';
       // Reset overlay pick when console changes (different variants
@@ -329,8 +330,8 @@ async function checkLatestVersion(console) {
 // releases) are left to the user.
 function imageVariantOf(name) {
   const base = String(name).split(/[/\\]/).pop().toLowerCase();
-  if (base.includes('-clone')) return 'clone';
-  if (base.includes('-original')) return 'original';
+  if (/-clone(?![a-z])/.test(base)) return 'clone';
+  if (/-original(?![a-z])/.test(base)) return 'original';
   return null;
 }
 
@@ -352,14 +353,15 @@ $('btn-select-file').addEventListener('click', async () => {
     });
     if (selected) {
       const mismatch = imageMismatch(selected);
-      if (mismatch) { setFlashStatus(mismatch, 'error'); return; }
+      if (mismatch) { setImageStatus(mismatch, 'error'); return; }
+      setImageStatus('');
       imagePath = selected;
       $('image-name').textContent = selected.split(/[/\\]/).pop();
       $('image-name').style.color = 'var(--text)';
       $('image-version').textContent = '';
       updateNextButton();
     }
-  } catch (e) { setFlashStatus(t('error') + ': ' + e, 'error'); }
+  } catch (e) { setImageStatus(t('error') + ': ' + e, 'error'); }
 });
 
 $('btn-download').addEventListener('click', async () => {
@@ -374,6 +376,7 @@ $('btn-download').addEventListener('click', async () => {
     // Soysauce uses original image
     const variant = selectedConsole === 'soysauce' ? 'original' : selectedConsole;
     const result = await invoke('download_image', { variant });
+    setImageStatus('');
     imagePath = result.path;
     $('image-name').textContent = result.image_name;
     $('image-name').style.color = 'var(--text)';
@@ -382,7 +385,7 @@ $('btn-download').addEventListener('click', async () => {
     $('dl-progress-text').textContent = '100%';
     setTimeout(() => dlProg.classList.add('hidden'), 2000);
   } catch (e) {
-    setFlashStatus(translateError(e), 'error');
+    setImageStatus(translateError(e), 'error');
     dlProg.classList.add('hidden');
   }
   setBusy(false);
@@ -766,6 +769,11 @@ function setBusy(b) {
   busy = b;
   updateNextButton();
   document.querySelectorAll('.mode-tab').forEach(t => t.disabled = b);
+}
+
+function setImageStatus(text, type) {
+  $('image-status').textContent = text;
+  $('image-status').className = 'status' + (type ? ' ' + type : '');
 }
 
 function setFlashStatus(text, type) {
