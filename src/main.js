@@ -29,7 +29,7 @@ async function initI18n() {
 
 function t(key, rep) {
   let s = lang[key] || key;
-  if (rep) for (const [k, v] of Object.entries(rep)) s = s.replace(`{${k}}`, v);
+  if (rep) for (const [k, v] of Object.entries(rep)) s = s.split(`{${k}}`).join(v);
   return s;
 }
 
@@ -232,6 +232,7 @@ document.querySelectorAll('#page-console .card').forEach(card => {
 
     if (changed) {
       imagePath = null;
+      setImageStatus('');
       $('image-name').textContent = t('no_image');
       $('image-version').textContent = '';
       // Reset overlay pick when console changes (different variants
@@ -323,6 +324,27 @@ async function checkLatestVersion(console) {
 // ---------------------------------------------------------------------------
 // Image selection
 // ---------------------------------------------------------------------------
+// Release images name their variant (...-original.img.gz / ...-clone.img.gz).
+// A local file of the other variant would get this console's boot setup on
+// the wrong bootloader, so it is refused. Names without a marker (older
+// releases) are left to the user.
+function imageVariantOf(name) {
+  const base = String(name).split(/[/\\]/).pop().toLowerCase();
+  if (/-clone(?![a-z])/.test(base)) return 'clone';
+  if (/-original(?![a-z])/.test(base)) return 'original';
+  return null;
+}
+
+function imageMismatch(name) {
+  const expected = selectedConsole === 'soysauce' ? 'original' : selectedConsole;
+  const found = imageVariantOf(name);
+  if (!found || !expected || found === expected) return null;
+  return t('image_variant_mismatch', {
+    image: t(CONSOLE_I18N[found]),
+    console: t(CONSOLE_I18N[selectedConsole] || selectedConsole),
+  });
+}
+
 $('btn-select-file').addEventListener('click', async () => {
   if (busy) return;
   try {
@@ -330,13 +352,16 @@ $('btn-select-file').addEventListener('click', async () => {
       filters: [{ name: 'Arch R Image', extensions: ['img', 'xz', 'gz'] }]
     });
     if (selected) {
+      const mismatch = imageMismatch(selected);
+      if (mismatch) { setImageStatus(mismatch, 'error'); return; }
+      setImageStatus('');
       imagePath = selected;
       $('image-name').textContent = selected.split(/[/\\]/).pop();
       $('image-name').style.color = 'var(--text)';
       $('image-version').textContent = '';
       updateNextButton();
     }
-  } catch (e) { setFlashStatus(t('error') + ': ' + e, 'error'); }
+  } catch (e) { setImageStatus(t('error') + ': ' + e, 'error'); }
 });
 
 $('btn-download').addEventListener('click', async () => {
@@ -351,6 +376,7 @@ $('btn-download').addEventListener('click', async () => {
     // Soysauce uses original image
     const variant = selectedConsole === 'soysauce' ? 'original' : selectedConsole;
     const result = await invoke('download_image', { variant });
+    setImageStatus('');
     imagePath = result.path;
     $('image-name').textContent = result.image_name;
     $('image-name').style.color = 'var(--text)';
@@ -359,7 +385,7 @@ $('btn-download').addEventListener('click', async () => {
     $('dl-progress-text').textContent = '100%';
     setTimeout(() => dlProg.classList.add('hidden'), 2000);
   } catch (e) {
-    setFlashStatus(translateError(e), 'error');
+    setImageStatus(translateError(e), 'error');
     dlProg.classList.add('hidden');
   }
   setBusy(false);
@@ -449,6 +475,8 @@ $('btn-confirm').addEventListener('click', async () => {
 });
 
 async function startFlash() {
+  const mismatch = imageMismatch(imagePath || '');
+  if (mismatch) { setFlashStatus(mismatch, 'error'); return; }
   setBusy(true);
   $('flash-progress').classList.remove('hidden');
   $('progress-fill').style.width = '0%';
@@ -741,6 +769,11 @@ function setBusy(b) {
   busy = b;
   updateNextButton();
   document.querySelectorAll('.mode-tab').forEach(t => t.disabled = b);
+}
+
+function setImageStatus(text, type) {
+  $('image-status').textContent = text;
+  $('image-status').className = 'status' + (type ? ' ' + type : '');
 }
 
 function setFlashStatus(text, type) {
