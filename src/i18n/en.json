@@ -20,6 +20,7 @@
   "soysauce_desc": "Soysauce edition",
   "select_image": "Select image",
   "no_image": "No image selected",
+  "image_variant_mismatch": "This image is for {image}, but {console} is selected. Download the image for {console} or choose the right console.",
   "select_file": "Select file",
   "download_latest": "Download latest version",
   "checking_version": "Checking latest version...",

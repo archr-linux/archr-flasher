@@ -20,6 +20,7 @@
   "soysauce_desc": "Издание Soysauce",
   "select_image": "Выберите образ",
   "no_image": "Образ не выбран",
+  "image_variant_mismatch": "Этот образ для {image}, а выбрана консоль {console}. Скачайте образ для {console} или выберите правильную консоль.",
   "select_file": "Выбрать файл",
   "download_latest": "Скачать последнюю версию",
   "checking_version": "Проверка последней версии...",

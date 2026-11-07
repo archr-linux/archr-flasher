@@ -20,6 +20,7 @@
   "soysauce_desc": "Soysauce 版本",
   "select_image": "选择镜像",
   "no_image": "未选择镜像",
+  "image_variant_mismatch": "此镜像适用于 {image}，但当前选择的是 {console}。请下载 {console} 的镜像，或选择正确的掌机。",
   "select_file": "选择文件",
   "download_latest": "下载最新版本",
   "checking_version": "正在检查最新版本...",

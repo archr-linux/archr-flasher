@@ -20,6 +20,7 @@
   "soysauce_desc": "Edición Soysauce",
   "select_image": "Selecciona la imagen",
   "no_image": "Ninguna imagen seleccionada",
+  "image_variant_mismatch": "Esta imagen es para {image}, pero la consola seleccionada es {console}. Descarga la imagen de {console} o elige la consola correcta.",
   "select_file": "Seleccionar archivo",
   "download_latest": "Descargar última versión",
   "checking_version": "Comprobando última versión...",

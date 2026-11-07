@@ -323,6 +323,27 @@ async function checkLatestVersion(console) {
 // ---------------------------------------------------------------------------
 // Image selection
 // ---------------------------------------------------------------------------
+// Release images name their variant (...-original.img.gz / ...-clone.img.gz).
+// A local file of the other variant would get this console's boot setup on
+// the wrong bootloader, so it is refused. Names without a marker (older
+// releases) are left to the user.
+function imageVariantOf(name) {
+  const base = String(name).split(/[/\\]/).pop().toLowerCase();
+  if (base.includes('-clone')) return 'clone';
+  if (base.includes('-original')) return 'original';
+  return null;
+}
+
+function imageMismatch(name) {
+  const expected = selectedConsole === 'soysauce' ? 'original' : selectedConsole;
+  const found = imageVariantOf(name);
+  if (!found || !expected || found === expected) return null;
+  return t('image_variant_mismatch', {
+    image: t(CONSOLE_I18N[found]),
+    console: t(CONSOLE_I18N[selectedConsole] || selectedConsole),
+  });
+}
+
 $('btn-select-file').addEventListener('click', async () => {
   if (busy) return;
   try {
@@ -330,6 +351,8 @@ $('btn-select-file').addEventListener('click', async () => {
       filters: [{ name: 'Arch R Image', extensions: ['img', 'xz', 'gz'] }]
     });
     if (selected) {
+      const mismatch = imageMismatch(selected);
+      if (mismatch) { setFlashStatus(mismatch, 'error'); return; }
       imagePath = selected;
       $('image-name').textContent = selected.split(/[/\\]/).pop();
       $('image-name').style.color = 'var(--text)';
@@ -449,6 +472,8 @@ $('btn-confirm').addEventListener('click', async () => {
 });
 
 async function startFlash() {
+  const mismatch = imageMismatch(imagePath || '');
+  if (mismatch) { setFlashStatus(mismatch, 'error'); return; }
   setBusy(true);
   $('flash-progress').classList.remove('hidden');
   $('progress-fill').style.width = '0%';
