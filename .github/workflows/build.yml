@@ -82,6 +82,7 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=${IDENTITY}" >> $GITHUB_ENV
 
       - name: Build and release
+        id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -98,6 +99,25 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }}
+
+      # Windows: the bundles above install the flasher; most people use it
+      # once or twice, so the same build also goes up as a portable .exe
+      # (WebView2 ships with Windows 10 and 11). A review asked for it.
+      - name: Upload portable exe (Windows)
+        if: runner.os == 'Windows' && steps.tauri.outputs.releaseId != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          NAME="Arch.R.Flasher_${VERSION}_x64-portable.exe"
+          cp src-tauri/target/release/archr-flasher.exe "$NAME"
+          curl -sSf -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"$NAME" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=${NAME}" >/dev/null
 
       # macOS: cleanup keychain (only if certificate was imported)
       - name: Cleanup keychain
