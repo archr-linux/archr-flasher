@@ -675,10 +675,11 @@ fn flash_core_windows(
     }
 
     // Step 3: Post-write config (mount boot partition, copy DTBO, write the
-    // variant file, switch extlinux.conf for soysauce). This stays in
-    // PowerShell — it only touches a mounted FAT partition with high-level
-    // cmdlets, none of the fragile raw-disk work.
+    // variant file, switch extlinux.conf for soysauce and the AISLPC
+    // boards). This stays in PowerShell — it only touches a mounted FAT
+    // partition with high-level cmdlets, none of the fragile raw-disk work.
     emit_progress(app, 95.0, "syncing");
+    let switch = crate::console::extlinux_switch(variant);
 
     let script_path = temp.join("archr-flash-config.ps1");
     let script_content = generate_windows_config_script();
@@ -695,6 +696,10 @@ fn flash_core_windows(
         .env("ARCHR_DEVICE", device)
         .env("ARCHR_DTBO", custom_dtbo_path)
         .env("ARCHR_VARIANT", variant)
+        .env("ARCHR_WRITE_VARIANT", if crate::console::writes_variant_file(variant) { "1" } else { "0" })
+        .env("ARCHR_EXTLINUX_SRC", switch.as_ref().map(|s| s.source.as_str()).unwrap_or(""))
+        .env("ARCHR_EXTLINUX_REQUIRED", if switch.as_ref().is_some_and(|s| s.required) { "1" } else { "0" })
+        .env("ARCHR_EXTLINUX_BACKUP", if switch.as_ref().is_some_and(|s| s.backup) { "1" } else { "0" })
         .args([
             "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", script_path.to_str().unwrap_or(""),
@@ -730,8 +735,8 @@ fn flash_core_windows(
 /// wrote, verified and rescanned the disk. This script only mounts the boot
 /// partition and lays down the panel config:
 /// - Copy the custom DTBO as overlays/mipi-panel.dtbo
-/// - Write the `variant` file
-/// - Switch extlinux.conf for the soysauce variant
+/// - Write the `variant` file (R36S family)
+/// - Switch extlinux.conf for soysauce and the AISLPC boards
 #[cfg(target_os = "windows")]
 fn generate_windows_config_script() -> String {
     // Pure-ASCII script; all variable input arrives via the environment
@@ -775,22 +780,27 @@ try {{
         Copy-Item -LiteralPath $CustomDTBO -Destination (Join-Path $overlayDir "mipi-panel.dtbo") -Force
     }}
 
-    # Write variant file
-    Set-Content -Path (Join-Path $bootDrive "variant") -Value $Variant -NoNewline
+    # Write variant file (R36S family only; AISLPC boards take none)
+    if ($env:ARCHR_WRITE_VARIANT -eq '1') {{
+        Set-Content -Path (Join-Path $bootDrive "variant") -Value $Variant -NoNewline
+    }}
 
-    # Switch extlinux config for the soysauce variant (it boots with an
-    # explicit FDT). This mirrors the Linux flash path; without it the
-    # board keeps the default extlinux.conf, ignores extlinux.conf.soysauce,
-    # and the console never boots.
-    if ($Variant -eq 'soysauce') {{
+    # Switch extlinux config for consoles that boot with their own one
+    # (soysauce: explicit FDT; AISLPC: one device tree per screen). This
+    # mirrors the Linux flash path; without it the board keeps the
+    # default extlinux.conf and boots the wrong device tree, or none.
+    $extlinuxSrc = $env:ARCHR_EXTLINUX_SRC
+    if (-not [string]::IsNullOrWhiteSpace($extlinuxSrc)) {{
         $extlinuxDir = Join-Path $bootDrive "extlinux"
         $extlinuxConf = Join-Path $extlinuxDir "extlinux.conf"
-        $soysauceConf = Join-Path $extlinuxDir "extlinux.conf.soysauce"
-        if (Test-Path $soysauceConf) {{
-            if (Test-Path $extlinuxConf) {{
-                Copy-Item $extlinuxConf (Join-Path $extlinuxDir "extlinux.conf.bak") -Force
+        $boardConf = Join-Path $extlinuxDir $extlinuxSrc
+        if (Test-Path -LiteralPath $boardConf) {{
+            if ($env:ARCHR_EXTLINUX_BACKUP -eq '1' -and (Test-Path -LiteralPath $extlinuxConf)) {{
+                Copy-Item -LiteralPath $extlinuxConf -Destination (Join-Path $extlinuxDir "extlinux.conf.bak") -Force
             }}
-            Copy-Item $soysauceConf $extlinuxConf -Force
+            Copy-Item -LiteralPath $boardConf -Destination $extlinuxConf -Force
+        }} elseif ($env:ARCHR_EXTLINUX_REQUIRED -eq '1') {{
+            throw "err:image_no_board_config extlinux/$extlinuxSrc is not in this image"
         }}
     }}
 

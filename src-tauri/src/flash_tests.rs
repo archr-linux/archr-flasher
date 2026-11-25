@@ -419,3 +419,116 @@ fn linux_helper_refuses_a_writable_image_descriptor() {
     let read_only = crate::flashwrite::read_only_descriptor(cached.as_file()).unwrap();
     assert_eq!(crate::flashwrite::entry_with_image(read_only, &args), 0);
 }
+
+// ---- AISLPC (RK3562): one image, one extlinux config per board ----
+
+const AISLPC_DEFAULT_CONF: &[u8] = b"FDT /dtbs/rk3562-aislpc-rg43v-pro.dtb\n# default\n";
+
+fn aislpc_conf(board: &str) -> Vec<u8> {
+    format!("FDT /dtbs/rk3562-aislpc-{}.dtb\n", board).into_bytes()
+}
+
+/// Boot FAT laid out like the AISLPC release image: KERNEL, one DTB per
+/// screen, extlinux.conf (RG43V PRO 1024x768) plus extlinux.conf.<board>
+/// for every board, a README, and no overlays directory.
+fn aislpc_boot_image(dir: &Path) -> PathBuf {
+    let path = boot_image(dir);
+    let img = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+    let mut slice = fscommon::StreamSlice::new(img, BOOT_START, BOOT_START + BOOT_SIZE).unwrap();
+    fatfs::format_volume(
+        &mut slice,
+        fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat32),
+    )
+    .unwrap();
+    slice.seek(SeekFrom::Start(0)).unwrap();
+    let fat = fatfs::FileSystem::new(slice, fatfs::FsOptions::new()).unwrap();
+    {
+        let root = fat.root_dir();
+        root.create_file("KERNEL").unwrap().write_all(&[0x4b; 100_000]).unwrap();
+        let dtbs = root.create_dir("dtbs").unwrap();
+        let extlinux = root.create_dir("extlinux").unwrap();
+        extlinux.create_file("extlinux.conf").unwrap().write_all(AISLPC_DEFAULT_CONF).unwrap();
+        extlinux.create_file("README.txt").unwrap().write_all(b"copy one over extlinux.conf").unwrap();
+        for (i, board) in crate::console::AISLPC_BOARDS.iter().enumerate() {
+            dtbs.create_file(&format!("rk3562-aislpc-{}.dtb", board))
+                .unwrap()
+                .write_all(&vec![i as u8 + 1; 30_000 + i * 1_000])
+                .unwrap();
+            extlinux
+                .create_file(&format!("extlinux.conf.{}", board))
+                .unwrap()
+                .write_all(&aislpc_conf(board))
+                .unwrap();
+        }
+    }
+    fat.unmount().unwrap();
+    path
+}
+
+/// Every file of the boot FAT with its contents, keyed by path.
+fn boot_tree(image: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk<T: fatfs::ReadWriteSeek>(
+        dir: fatfs::Dir<'_, T>,
+        prefix: &str,
+        out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    ) {
+        for entry in dir.iter() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            let path = format!("{}{}", prefix, name);
+            if entry.is_dir() {
+                walk(entry.to_dir(), &format!("{}/", path), out);
+            } else {
+                let mut bytes = Vec::new();
+                entry.to_file().read_to_end(&mut bytes).unwrap();
+                out.insert(path, bytes);
+            }
+        }
+    }
+    let img = File::open(image).unwrap();
+    let slice = fscommon::StreamSlice::new(img, BOOT_START, BOOT_START + BOOT_SIZE).unwrap();
+    let fat = fatfs::FileSystem::new(slice, fatfs::FsOptions::new()).unwrap();
+    let mut out = std::collections::BTreeMap::new();
+    walk(fat.root_dir(), "", &mut out);
+    out
+}
+
+#[test]
+fn aislpc_board_changes_only_extlinux_conf() {
+    for board in crate::console::AISLPC_BOARDS {
+        let dir = tempfile::tempdir().unwrap();
+        let image = aislpc_boot_image(dir.path());
+        validate_flash_inputs(image.to_str().unwrap(), "").unwrap();
+        let mut want = boot_tree(&image);
+        patch_boot_partition(&image, Path::new(""), board).unwrap();
+        want.insert("extlinux/extlinux.conf".into(), aislpc_conf(board));
+        // No variant marker, no overlays directory, no backup: the
+        // extlinux.conf contents are the only difference.
+        assert_eq!(boot_tree(&image), want, "{board}");
+    }
+}
+
+#[test]
+fn aislpc_board_refuses_an_image_without_its_config() {
+    // An R36S image picked for an AISLPC console carries no
+    // extlinux.conf.<board>: flashing it would boot the wrong board.
+    let dir = tempfile::tempdir().unwrap();
+    let image = boot_image(dir.path());
+    let before = boot_tree(&image);
+    let err = patch_boot_partition(&image, Path::new(""), "rg52-mini").unwrap_err();
+    assert!(err.contains("err:image_no_board_config"), "{err}");
+    assert!(err.contains("extlinux.conf.rg52-mini"), "{err}");
+    assert_eq!(boot_tree(&image), before);
+}
+
+#[test]
+fn game_console_on_aislpc_layout_keeps_its_default_config() {
+    // Original/clone never touch extlinux.conf.
+    let dir = tempfile::tempdir().unwrap();
+    let image = aislpc_boot_image(dir.path());
+    patch_boot_partition(&image, Path::new(""), "original").unwrap();
+    assert_eq!(boot_file(&image, "extlinux/extlinux.conf"), AISLPC_DEFAULT_CONF);
+}

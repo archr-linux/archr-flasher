@@ -282,8 +282,12 @@ fn mtools_file(card: &Path, name: &str) -> Option<Vec<u8>> {
 /// fsck.fat -n on the boot FAT of an image, when dosfstools is installed.
 /// Returns its report; panics on any error it finds.
 fn fsck_boot(image: &Path) -> Option<String> {
+    fsck_boot_at(image, ARCHR_BOOT_START, crate::test_support::ARCHR_BOOT_SIZE)
+}
+
+fn fsck_boot_at(image: &Path, start: u64, size: u64) -> Option<String> {
     let bytes = fs::read(image).unwrap();
-    let boot = &bytes[ARCHR_BOOT_START as usize..][..crate::test_support::ARCHR_BOOT_SIZE as usize];
+    let boot = &bytes[start as usize..][..size as usize];
     let dir = tempfile::tempdir().unwrap();
     let slice = dir.path().join("boot.fat");
     fs::write(&slice, boot).unwrap();
@@ -434,4 +438,66 @@ fn archr_fixture_is_fat32_with_the_shipped_geometry() {
     if let Some(kernel) = mtools_file(&image, "KERNEL") {
         assert!(kernel == pattern(1, 300_000));
     }
+}
+
+#[test]
+fn linux_aislpc_stage_switches_extlinux_and_writes_no_variant() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("aislpc.img");
+    archr_boot_image(&source);
+    {
+        let file = fs::OpenOptions::new().read(true).write(true).open(&source).unwrap();
+        let slice = fscommon::StreamSlice::new(
+            file, ARCHR_BOOT_START, ARCHR_BOOT_START + crate::test_support::ARCHR_BOOT_SIZE,
+        ).unwrap();
+        let fat = fatfs::FileSystem::new(slice, fatfs::FsOptions::new()).unwrap();
+        fat.root_dir().open_dir("extlinux").unwrap()
+            .create_file("extlinux.conf.rg43v-pro-1024x600").unwrap()
+            .write_all(b"rg43v-pro-1024x600 config").unwrap();
+        fat.unmount().unwrap();
+    }
+    let original = fs::read(&source).unwrap();
+    let work = dir.path().join("cache");
+    let prepared = PreparedImage::from_file(File::open(&source).unwrap(), source.clone()).unwrap();
+    let staged = super::stage_boot_config(prepared, Path::new(""), "rg43v-pro-1024x600", &work).unwrap();
+    assert!(fs::read(&source).unwrap() == original, "the selected image was modified");
+    assert_eq!(boot_file(&staged.path, "extlinux/extlinux.conf"), b"rg43v-pro-1024x600 config");
+    assert_eq!(boot_file(&staged.path, "overlays/mipi-panel.dtbo"), b"original panel");
+    assert!(crate::rawwrite_unix::read_boot_file(&mut File::open(&staged.path).unwrap(), "variant").is_err());
+    assert!(crate::rawwrite_unix::read_boot_file(&mut File::open(&staged.path).unwrap(), "extlinux/extlinux.conf.bak").is_err());
+    fsck_boot(&staged.path);
+}
+
+/// Manual check against a real AISLPC release image: the raw .img, or its
+/// first ~300 MB with the root/storage MBR entries shrunk to fit the copy
+/// (the boot FAT is all this reads). Never touches a disk:
+/// ARCHR_AISLPC_IMG=/path/copy.img cargo test -- --ignored aislpc_release_image
+#[test]
+#[ignore]
+fn aislpc_release_image_stages_every_board() {
+    let Ok(path) = std::env::var("ARCHR_AISLPC_IMG") else { return };
+    let source = Path::new(&path);
+    let read = |p: &Path, name: &str| {
+        crate::rawwrite_unix::read_boot_file(&mut File::open(p).unwrap(), name)
+    };
+    let original_conf = read(source, "extlinux/extlinux.conf").unwrap();
+    for board in crate::console::AISLPC_BOARDS {
+        let work = tempfile::tempdir_in(source.parent().unwrap()).unwrap();
+        let inputs = crate::preflight::validate_flash_inputs(&path, "").unwrap();
+        let prepared = PreparedImage::from_file(inputs.image, source.to_path_buf()).unwrap();
+        let staged = super::stage_boot_config(prepared, Path::new(""), board, work.path()).unwrap();
+        let conf = read(&staged.path, "extlinux/extlinux.conf").unwrap();
+        let want = read(&staged.path, &format!("extlinux/extlinux.conf.{}", board)).unwrap();
+        assert_eq!(conf, want, "{board}");
+        assert!(String::from_utf8_lossy(&conf).contains(&format!("rk3562-aislpc-{}.dtb", board)));
+        assert!(read(&staged.path, "variant").is_err());
+        // Boot FAT bounds from the first MBR entry.
+        let mbr = fs::read(&staged.path).unwrap();
+        let lba = |o: usize| u32::from_le_bytes(mbr[o..o + 4].try_into().unwrap()) as u64 * 512;
+        fsck_boot_at(&staged.path, lba(454), lba(458));
+        let fdt = String::from_utf8_lossy(&conf).lines().map(str::trim).find(|l| l.starts_with("FDT")).unwrap().to_string();
+        eprintln!("{board}: {fdt}");
+    }
+    assert_eq!(read(source, "extlinux/extlinux.conf").unwrap(), original_conf, "the source image was modified");
 }

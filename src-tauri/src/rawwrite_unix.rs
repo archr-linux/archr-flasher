@@ -253,8 +253,8 @@ fn full_sync(f: &File) -> std::io::Result<()> {
 }
 
 
-/// Install the panel overlay, variant marker and (for soysauce) the
-/// extlinux switch INSIDE the image file, before anything touches the
+/// Install the panel overlay, variant marker and the console's extlinux
+/// config (soysauce, AISLPC boards; see console.rs) INSIDE the image file, before anything touches the
 /// card. This is how the macOS and Linux paths configure the boot
 /// partition. The ArchR boot FAT is a below-spec-cluster-count FAT32 that
 /// the macOS msdos driver refuses to mount. On Linux, mounting the freshly
@@ -298,26 +298,43 @@ pub fn patch_boot_partition(image: &mut File, dtbo: &Path, variant: &str) -> Res
                 .map_err(|e| format!("err:image_patch writing overlay: {}", e))?;
         }
 
-        let mut v = root
-            .create_file("variant")
-            .map_err(|e| format!("err:image_patch creating variant: {}", e))?;
-        v.truncate()
-            .map_err(|e| format!("err:image_patch truncating variant: {}", e))?;
-        v.write_all(variant.as_bytes())
-            .map_err(|e| format!("err:image_patch writing variant: {}", e))?;
-        drop(v);
+        if crate::console::writes_variant_file(variant) {
+            let mut v = root
+                .create_file("variant")
+                .map_err(|e| format!("err:image_patch creating variant: {}", e))?;
+            v.truncate()
+                .map_err(|e| format!("err:image_patch truncating variant: {}", e))?;
+            v.write_all(variant.as_bytes())
+                .map_err(|e| format!("err:image_patch writing variant: {}", e))?;
+        }
 
-        if variant == "soysauce" {
+        if let Some(switch) = crate::console::extlinux_switch(variant) {
             let extlinux = root
                 .open_dir("extlinux")
                 .map_err(|e| format!("err:image_patch extlinux dir: {}", e))?;
-            let mut soys = Vec::new();
-            // Older images without the alternate config keep the default.
-            if let Ok(mut f) = extlinux.open_file("extlinux.conf.soysauce") {
-                f.read_to_end(&mut soys)
-                    .map_err(|e| format!("err:image_patch reading soysauce conf: {}", e))?;
+            let mut board = Vec::new();
+            match extlinux.open_file(&switch.source) {
+                Ok(mut f) => {
+                    f.read_to_end(&mut board)
+                        .map_err(|e| format!("err:image_patch reading {}: {}", switch.source, e))?;
+                }
+                // Older soysauce images without the alternate config keep
+                // the default; an AISLPC image must carry the board's.
+                Err(_) if !switch.required => {}
+                Err(e) => {
+                    return Err(format!(
+                        "err:image_no_board_config extlinux/{} is not in this image ({})",
+                        switch.source, e
+                    ));
+                }
             }
-            if !soys.is_empty() {
+            if board.is_empty() && switch.required {
+                return Err(format!(
+                    "err:image_no_board_config extlinux/{} is empty",
+                    switch.source
+                ));
+            }
+            if !board.is_empty() && switch.backup {
                 let mut cur = Vec::new();
                 extlinux
                     .open_file("extlinux.conf")
@@ -331,12 +348,14 @@ pub fn patch_boot_partition(image: &mut File, dtbo: &Path, variant: &str) -> Res
                 bak.write_all(&cur)
                     .map_err(|e| format!("err:image_patch writing conf backup: {}", e))?;
                 drop(bak);
+            }
+            if !board.is_empty() {
                 let mut conf = extlinux
                     .open_file("extlinux.conf")
                     .map_err(|e| format!("err:image_patch opening extlinux.conf: {}", e))?;
                 conf.truncate()
                     .map_err(|e| format!("err:image_patch truncating extlinux.conf: {}", e))?;
-                conf.write_all(&soys)
+                conf.write_all(&board)
                     .map_err(|e| format!("err:image_patch writing extlinux.conf: {}", e))?;
                 drop(conf);
             }

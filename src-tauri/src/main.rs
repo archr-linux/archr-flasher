@@ -4,6 +4,7 @@
 mod diaglog;
 mod disk;
 mod flash;
+mod console;
 mod github;
 mod overlay;
 mod preflight;
@@ -99,6 +100,44 @@ async fn download_image(app: tauri::AppHandle, variant: String) -> Result<Downlo
     })
 }
 
+/// Download the latest image for a console and save a copy where the user
+/// chose, without flashing: for writing it with another tool, or keeping
+/// it for later. Reuses the download cache, so a later flash (or a second
+/// save) does not download again. The .sha256 goes next to the copy when
+/// the release has one.
+#[tauri::command]
+async fn save_image(app: tauri::AppHandle, variant: String, dest: String) -> Result<DownloadResult, String> {
+    let release = github::get_latest_release(&variant).await?;
+    let cache_dir = app.path().app_cache_dir()
+        .map_err(|e| format!("Cache dir error: {}", e))?;
+    let (cached_path, cached) = github::download_image(&app, &release, &cache_dir).await?;
+
+    let dest_path = std::path::PathBuf::from(&dest);
+    let sha = release.expected_sha256.clone();
+    let image_name = release.image_name.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        if dest_path != cached_path {
+            std::fs::copy(&cached_path, &dest_path)
+                .map_err(|e| format!("Cannot save image to {}: {}", dest_path.display(), e))?;
+        }
+        if let Some(sha) = sha {
+            let file = dest_path.file_name().map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or(image_name);
+            let mut sum = dest_path.into_os_string();
+            sum.push(".sha256");
+            let _ = std::fs::write(sum, format!("{}  {}\n", sha, file));
+        }
+        Ok(())
+    }).await.map_err(|e| format!("Task error: {}", e))??;
+
+    Ok(DownloadResult {
+        path: dest,
+        version: release.version,
+        image_name: release.image_name,
+        cached,
+    })
+}
+
 /// Verify integrity of a local image file by computing its SHA256.
 /// If expected_hash is provided, compares against it.
 #[tauri::command]
@@ -154,6 +193,7 @@ async fn flash_image(
     variant: String,
     verify: bool,
 ) -> Result<String, String> {
+    console::check_flash_request(&variant, &overlay_path)?;
     let app_clone = app.clone();
 
     // Cache dir lives on the user's data disk, not /tmp (which is OS
@@ -343,6 +383,7 @@ fn main() {
             list_disks,
             check_latest_release,
             download_image,
+            save_image,
             verify_image,
             flash_image,
             find_archr_sd,

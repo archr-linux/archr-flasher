@@ -209,6 +209,23 @@ body {
   grid-template-columns: 1fr 1fr 1fr;
 }
 
+/* Console selector groups: "- Game Console", "- AISLPC". */
+.console-group {
+  font-size: 12px;
+  font-weight: normal;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+  margin: 14px 0 8px;
+}
+
+.console-group:first-child {
+  margin-top: 0;
+}
+
+.console-group::before {
+  content: "- ";
+}
+
 .card {
   background: var(--bg-card);
   border: 2px solid var(--border);

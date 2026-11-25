@@ -99,5 +99,17 @@
   "error_report_title": "Algo deu errado",
   "error_report_hint": "O log de diagnóstico abaixo descreve o que aconteceu. Você pode enviá-lo aos desenvolvedores como uma issue no GitHub.",
   "error_report_close": "Fechar",
-  "error_report_github": "Reportar no GitHub"
+  "error_report_github": "Reportar no GitHub",
+  "group_game_console": "Game Console",
+  "group_aislpc": "AISLPC",
+  "aislpc_name": "AISLPC (RG43V PRO / RG52 MINI)",
+  "aislpc_no_overlay": "Não precisa de overlay: depois de gravar, o gravador ajusta o extlinux.conf para o {console}. Nada mais a fazer.",
+  "not_in_release": "Fora da última versão",
+  "save_image": "Só baixar a imagem (sem gravar)...",
+  "saving_image": "Baixando a imagem...",
+  "image_saved": "Imagem salva em {path}",
+  "overlay_not_needed": "não precisa (extlinux.conf ajustado para este console)",
+  "done_aislpc": "Cartão SD pronto! Coloque no seu {console} e ligue.",
+  "error_no_image_aislpc": "A última versão ainda não tem imagem para os consoles AISLPC. Use \"Selecionar arquivo\" com uma imagem AISLPC local (...-aislpc.img.gz).",
+  "error_no_board_config": "Esta imagem não tem a configuração de tela do console escolhido. Use a imagem AISLPC (...-aislpc.img.gz)."
 }

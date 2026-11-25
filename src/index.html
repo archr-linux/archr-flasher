@@ -76,7 +76,8 @@
 
         <!-- Step: Console -->
         <div class="step-content active" id="page-console">
-          <div class="card-grid">
+          <h3 class="console-group" data-i18n="group_game_console">Game Console</h3>
+          <div class="card-grid compact">
             <button class="card" data-console="original">
               <strong data-i18n="original_name">R36S Original</strong>
               <small data-i18n="original_desc">12 panels</small>
@@ -88,6 +89,21 @@
             <button class="card" data-console="soysauce">
               <strong data-i18n="soysauce_name">R36S Soysauce</strong>
               <small data-i18n="soysauce_desc">7 panels</small>
+            </button>
+          </div>
+          <h3 class="console-group" data-i18n="group_aislpc">AISLPC</h3>
+          <div class="card-grid compact">
+            <button class="card" data-console="rg43v-pro">
+              <strong>RG43V PRO</strong>
+              <small>1024x768</small>
+            </button>
+            <button class="card" data-console="rg43v-pro-1024x600">
+              <strong>RG43V PRO</strong>
+              <small>1024x600</small>
+            </button>
+            <button class="card" data-console="rg52-mini">
+              <strong>RG52 MINI</strong>
+              <small>720x1280</small>
             </button>
           </div>
         </div>
@@ -102,6 +118,8 @@
             <button class="btn" id="btn-select-file" data-i18n="select_file">Select file</button>
             <button class="btn" id="btn-download" data-i18n="download_latest">Download latest</button>
           </div>
+          <button class="btn btn-link-style" id="btn-save-image" data-i18n="save_image">Download image only (don't flash)...</button>
+          <p class="overlay-hint hidden" id="image-aislpc-note"></p>
           <div class="progress-inline hidden" id="download-progress">
             <div class="progress-bar"><div class="progress-fill" id="dl-progress-fill"></div></div>
             <span class="progress-label" id="dl-progress-text">0%</span>

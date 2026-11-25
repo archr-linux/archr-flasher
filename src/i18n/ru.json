@@ -99,5 +99,17 @@
   "error_report_title": "Что-то пошло не так",
   "error_report_hint": "Приведённый ниже журнал диагностики описывает, что произошло. Вы можете отправить его разработчикам как issue на GitHub.",
   "error_report_close": "Закрыть",
-  "error_report_github": "Сообщить на GitHub"
+  "error_report_github": "Сообщить на GitHub",
+  "group_game_console": "Game Console",
+  "group_aislpc": "AISLPC",
+  "aislpc_name": "AISLPC (RG43V PRO / RG52 MINI)",
+  "aislpc_no_overlay": "Оверлей не нужен: после записи прошивальщик настроит extlinux.conf для {console}. Больше ничего делать не нужно.",
+  "not_in_release": "Нет в последнем выпуске",
+  "save_image": "Только скачать образ (без прошивки)...",
+  "saving_image": "Скачивание образа...",
+  "image_saved": "Образ сохранён в {path}",
+  "overlay_not_needed": "не нужен (extlinux.conf настроен для этой консоли)",
+  "done_aislpc": "SD-карта готова! Вставьте её в {console} и включите.",
+  "error_no_image_aislpc": "В последнем выпуске пока нет образа для консолей AISLPC. Нажмите «Выбрать файл» и укажите локальный образ AISLPC (...-aislpc.img.gz).",
+  "error_no_board_config": "В этом образе нет настройки экрана для выбранной консоли. Используйте образ AISLPC (...-aislpc.img.gz)."
 }

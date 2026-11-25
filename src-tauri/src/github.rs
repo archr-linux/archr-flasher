@@ -67,24 +67,13 @@ pub async fn get_latest_release(variant: &str) -> Result<ReleaseInfo, String> {
         .await
         .map_err(|e| format!("JSON parse error: {}", e))?;
 
-    // Match image by variant. Asset names may use either format:
-    //   v1: ArchR-R36S-YYYYMMDD.img.gz / ArchR-R36S-clone-YYYYMMDD.img.gz
-    //   v2: ArchR-R36S.aarch64-YYYYMMDD-original.img.gz / ...-clone.img.gz
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| {
-            let is_image = a.name.ends_with(".img.xz") || a.name.ends_with(".img.gz");
-            if !is_image {
-                return false;
-            }
-            let name = &a.name;
-            match variant {
-                "clone" => name.contains("-clone"),
-                _ => name.starts_with("ArchR-R36S") && !name.contains("-clone"),
-            }
-        })
-        .ok_or_else(|| format!("No image found for '{}' in latest release", variant))?;
+    // `variant` is a console id or an image family; see console.rs.
+    let family = crate::console::image_family(variant)
+        .ok_or_else(|| format!("Unknown console '{}'", variant))?;
+    let name = crate::console::pick_image_asset(release.assets.iter().map(|a| a.name.as_str()), family)
+        .ok_or_else(|| format!("No image found for '{}' in latest release {}", family, release.tag_name))?;
+    let asset = release.assets.iter().find(|a| a.name == name)
+        .expect("picked from these assets");
 
     // Look for a matching .sha256 asset (e.g. "image.img.xz.sha256")
     let sha256_asset_name = format!("{}.sha256", asset.name);

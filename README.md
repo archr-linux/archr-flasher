@@ -9,7 +9,7 @@
 
 ---
 
-Cross-platform desktop app for flashing [Arch R](https://github.com/archr-linux/Arch-R) onto R36S Original, R36S Clone, and Soysauce gaming consoles. Handles image download, SD card writing, and per-motherboard panel configuration in one step.
+Cross-platform desktop app for flashing [Arch R](https://github.com/archr-linux/Arch-R) onto R36S Original, R36S Clone, and Soysauce gaming consoles, and the AISLPC RG43V PRO and RG52 MINI (RK3562). Handles image download, SD card writing, and per-motherboard panel configuration in one step.
 
 ## Features
 
@@ -57,8 +57,8 @@ Grab the latest release for your platform from [Releases](https://github.com/arc
 
 ### Flash Tab
 
-1. **Console** — pick **R36S Original**, **R36S Clone**, or **Soysauce**
-2. **Image** — download the latest from GitHub, or pick a local `.img` / `.img.xz` / `.img.gz`
+1. **Console** — under **Game Console** pick **R36S Original**, **R36S Clone**, or **Soysauce**; under **AISLPC** pick **RG43V PRO (1024x768)**, **RG43V PRO (1024x600)**, or **RG52 MINI**
+2. **Image** — download the latest from GitHub, or pick a local `.img` / `.img.xz` / `.img.gz`. "Download image only" saves the console's image without flashing. AISLPC consoles skip the panel step: the flasher copies `extlinux/extlinux.conf.<board>` over `extlinux/extlinux.conf` after writing, and that is all they need
 3. **Panel** — select your motherboard revision from the curated list, or import a stock vendor `.dtb` to auto-generate a custom overlay
 4. **Customize** (optional) — rotation, stick inversion, HP invert, joypad variant, simple audio, vendor mode skip
 5. **SD Card** — pick the target removable disk

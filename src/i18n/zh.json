@@ -99,5 +99,17 @@
   "error_report_title": "出现问题",
   "error_report_hint": "下方的诊断日志描述了发生的情况。您可以将其作为 GitHub issue 发送给开发者。",
   "error_report_close": "关闭",
-  "error_report_github": "在 GitHub 上报告"
+  "error_report_github": "在 GitHub 上报告",
+  "group_game_console": "Game Console",
+  "group_aislpc": "AISLPC",
+  "aislpc_name": "AISLPC (RG43V PRO / RG52 MINI)",
+  "aislpc_no_overlay": "无需覆盖层：写入后，烧录器会为 {console} 设置 extlinux.conf。无需其他操作。",
+  "not_in_release": "最新版本中没有",
+  "save_image": "仅下载镜像（不烧录）...",
+  "saving_image": "正在下载镜像...",
+  "image_saved": "镜像已保存到 {path}",
+  "overlay_not_needed": "不需要（已为此主机设置 extlinux.conf）",
+  "done_aislpc": "SD 卡已就绪！插入你的 {console} 并开机。",
+  "error_no_image_aislpc": "最新版本还没有 AISLPC 主机的镜像。请用“选择文件”选择本地 AISLPC 镜像（...-aislpc.img.gz）。",
+  "error_no_board_config": "此镜像没有所选主机的屏幕配置。请使用 AISLPC 镜像（...-aislpc.img.gz）。"
 }

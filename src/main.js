@@ -72,6 +72,24 @@ let ovlOverlayPath = '';
 const FLASH_STEPS = ['console', 'image', 'overlay', 'disk', 'flash'];
 const OVERLAY_STEPS = ['ovl-detect', 'ovl-overlay', 'ovl-apply'];
 
+// Selectable consoles. `family` is the release image they boot (the
+// marker in the asset name). Game Console entries take a panel overlay;
+// AISLPC boards share one image and only get their own extlinux.conf
+// (extlinux.conf.<id>), set by the backend after writing.
+const CONSOLES = {
+  'original':           { family: 'original', name: () => t('original_name') },
+  'clone':              { family: 'clone',    name: () => t('clone_name') },
+  'soysauce':           { family: 'original', name: () => t('soysauce_name') },
+  'rg43v-pro':          { family: 'aislpc',   name: () => 'RG43V PRO (1024x768)' },
+  'rg43v-pro-1024x600': { family: 'aislpc',   name: () => 'RG43V PRO (1024x600)' },
+  'rg52-mini':          { family: 'aislpc',   name: () => 'RG52 MINI' },
+};
+const FAMILY_NAMES = { original: 'original_name', clone: 'clone_name', aislpc: 'aislpc_name' };
+
+function familyOf(id) { return CONSOLES[id]?.family || null; }
+function isAislpc(id) { return familyOf(id) === 'aislpc'; }
+function consoleName(id) { return CONSOLES[id] ? CONSOLES[id].name() : String(id); }
+
 const STEP_TITLES = {
   'console': 'select_console', 'image': 'select_image',
   'overlay': 'step_overlay', 'disk': 'select_sd_title', 'flash': 'step_flash',
@@ -79,7 +97,11 @@ const STEP_TITLES = {
   'ovl-apply': 'step_apply',
 };
 
-function getSteps() { return mode === 'flash' ? FLASH_STEPS : OVERLAY_STEPS; }
+// AISLPC boards take no overlay: their flash wizard has no overlay step.
+function getSteps() {
+  if (mode !== 'flash') return OVERLAY_STEPS;
+  return isAislpc(selectedConsole) ? FLASH_STEPS.filter(s => s !== 'overlay') : FLASH_STEPS;
+}
 function getStepId() { return getSteps()[currentStep]; }
 
 // ---------------------------------------------------------------------------
@@ -98,7 +120,7 @@ function nextStep() {
     // Execute step-specific actions before advancing
     const stepId = getStepId();
     if (mode === 'flash') {
-      if (stepId === 'overlay') refreshDisks();
+      if (steps[currentStep + 1] === 'disk') refreshDisks();
       if (stepId === 'disk') onDiskReady();
     }
     if (mode === 'overlay') {
@@ -121,9 +143,14 @@ function updateUI() {
   $('steps-flash').classList.toggle('hidden', mode !== 'flash');
   $('steps-overlay').classList.toggle('hidden', mode !== 'overlay');
 
-  document.querySelectorAll(`#${stepsNav} .step`).forEach((el, i) => {
+  // Steps not in this console's wizard are hidden and the rest renumbered.
+  document.querySelectorAll(`#${stepsNav} .step`).forEach(el => {
+    const i = steps.indexOf(el.dataset.step);
+    el.classList.toggle('hidden', i < 0);
     el.classList.toggle('active', i === currentStep);
-    el.classList.toggle('done', i < currentStep);
+    el.classList.toggle('done', i >= 0 && i < currentStep);
+    const num = el.querySelector('.step-num');
+    if (num && i >= 0) num.textContent = String(i + 1);
   });
 
   // Update main content
@@ -244,10 +271,14 @@ document.querySelectorAll('#page-console .card').forEach(card => {
       if (pickedLabel) pickedLabel.textContent = t('no_overlay_picked');
       const skipBox = $('overlay-skip-flash');
       if (skipBox) skipBox.checked = false;
+      const note = $('image-aislpc-note');
+      note.textContent = isAislpc(console) ? t('aislpc_no_overlay', { console: consoleName(console) }) : '';
+      note.classList.toggle('hidden', !isAislpc(console));
       checkLatestVersion(console);
     }
 
-    updateNextButton();
+    // The sidebar follows the console: AISLPC has no overlay step.
+    updateUI();
   });
 });
 
@@ -311,37 +342,48 @@ $('btn-pick-overlay-ovl')?.addEventListener('click', async () => {
 async function checkLatestVersion(console) {
   $('image-version').textContent = t('checking_version');
   try {
-    const variant = console === 'soysauce' ? 'original' : console;
-    const release = await invoke('check_latest_release', { variant });
+    const release = await invoke('check_latest_release', { variant: familyOf(console) });
     if (selectedConsole === console) {
       $('image-version').textContent = t('latest_version', { version: release.version });
     }
-  } catch (_) {
-    if (selectedConsole === console) $('image-version').textContent = t('offline');
+  } catch (e) {
+    if (selectedConsole !== console) return;
+    // Online, but the latest release has no image for this console yet
+    // (AISLPC before its first release): say so instead of "Offline".
+    $('image-version').textContent = isNoImageError(e) ? t('not_in_release') : t('offline');
   }
 }
+
+function isNoImageError(e) { return /no image found for/i.test(String(e)); }
 
 // ---------------------------------------------------------------------------
 // Image selection
 // ---------------------------------------------------------------------------
-// Release images name their variant (...-original.img.gz / ...-clone.img.gz).
-// A local file of the other variant would get this console's boot setup on
-// the wrong bootloader, so it is refused. Names without a marker (older
-// releases) are left to the user.
+// Release images name their family (...-original.img.gz / ...-clone.img.gz /
+// ...-aislpc.img.gz). A local file of another family would get this
+// console's boot setup on the wrong bootloader or board, so it is refused.
+// R36S names without a marker (older releases) are left to the user on
+// Game Console entries, but are never an AISLPC image.
 function imageVariantOf(name) {
   const base = String(name).split(/[/\\]/).pop().toLowerCase();
+  if (/-aislpc(?![a-z])/.test(base)) return 'aislpc';
   if (/-clone(?![a-z])/.test(base)) return 'clone';
   if (/-original(?![a-z])/.test(base)) return 'original';
+  if (base.startsWith('archr-r36s')) return 'r36s';
   return null;
 }
 
 function imageMismatch(name) {
-  const expected = selectedConsole === 'soysauce' ? 'original' : selectedConsole;
-  const found = imageVariantOf(name);
+  const expected = familyOf(selectedConsole);
+  let found = imageVariantOf(name);
+  if (found === 'r36s') {
+    if (expected !== 'aislpc') return null;
+    found = 'original';
+  }
   if (!found || !expected || found === expected) return null;
   return t('image_variant_mismatch', {
-    image: t(CONSOLE_I18N[found]),
-    console: t(CONSOLE_I18N[selectedConsole] || selectedConsole),
+    image: t(FAMILY_NAMES[found]),
+    console: consoleName(selectedConsole),
   });
 }
 
@@ -373,9 +415,8 @@ $('btn-download').addEventListener('click', async () => {
   $('dl-progress-text').textContent = '0%';
 
   try {
-    // Soysauce uses original image
-    const variant = selectedConsole === 'soysauce' ? 'original' : selectedConsole;
-    const result = await invoke('download_image', { variant });
+    // Soysauce boots the original image; every AISLPC board the aislpc one.
+    const result = await invoke('download_image', { variant: familyOf(selectedConsole) });
     setImageStatus('');
     imagePath = result.path;
     $('image-name').textContent = result.image_name;
@@ -390,6 +431,38 @@ $('btn-download').addEventListener('click', async () => {
   }
   setBusy(false);
   updateNextButton();
+});
+
+// Download the console's image and save a copy where the user picks,
+// without flashing. The copy comes from the download cache, so flashing
+// afterwards does not download again.
+$('btn-save-image').addEventListener('click', async () => {
+  if (busy || !selectedConsole) return;
+  const variant = familyOf(selectedConsole);
+  setBusy(true);
+  try {
+    const release = await invoke('check_latest_release', { variant });
+    const dest = await window.__TAURI__.dialog.save({
+      defaultPath: release.image_name,
+      filters: [{ name: 'Arch R Image', extensions: ['gz', 'xz'] }],
+    });
+    if (dest) {
+      const dlProg = $('download-progress');
+      dlProg.classList.remove('hidden');
+      $('dl-progress-fill').style.width = '0%';
+      $('dl-progress-text').textContent = '0%';
+      setImageStatus(t('saving_image'), '');
+      try {
+        const result = await invoke('save_image', { variant, dest: String(dest) });
+        setImageStatus(t('image_saved', { path: result.path }), 'success');
+      } finally {
+        setTimeout(() => dlProg.classList.add('hidden'), 2000);
+      }
+    }
+  } catch (e) {
+    setImageStatus(translateError(e), 'error');
+  }
+  setBusy(false);
 });
 
 window.__TAURI__?.event?.listen('download-progress', (event) => {
@@ -429,13 +502,13 @@ function onDiskReady() { buildFlashSummary(); }
 // ---------------------------------------------------------------------------
 // Flash summary & execution
 // ---------------------------------------------------------------------------
-const CONSOLE_I18N = { original: 'original_name', clone: 'clone_name', soysauce: 'soysauce_name' };
-
 function buildFlashSummary() {
-  const consoleName = t(CONSOLE_I18N[selectedConsole] || selectedConsole);
-  const overlayName = flashOverlayPath
-    ? flashOverlayPath.split(/[/\\]/).pop()
-    : t('overlay_default_image');
+  const name = consoleName(selectedConsole);
+  const overlayName = isAislpc(selectedConsole)
+    ? t('overlay_not_needed')
+    : flashOverlayPath
+      ? flashOverlayPath.split(/[/\\]/).pop()
+      : t('overlay_default_image');
   const diskName = selectedDisk ? $('disk-select').options[$('disk-select').selectedIndex].textContent : t('overlay_none');
   const imgName = $('image-name').textContent;
   // Build via DOM API + textContent. Filenames picked by the user
@@ -446,7 +519,7 @@ function buildFlashSummary() {
   const summary = $('flash-summary');
   summary.replaceChildren();
   const rows = [
-    [t('step_console'), consoleName],
+    [t('step_console'), name],
     [t('step_image'),   imgName],
     [t('step_overlay'), overlayName],
     [t('step_disk'),    diskName],
@@ -490,17 +563,20 @@ async function startFlash() {
     // Empty overlayPath = user opted to skip; backend keeps whatever
     // mipi-panel.dtbo the image already carries (the default one
     // shipped in the build's /flash/overlays/ tree).
+    // AISLPC boards take no overlay; the backend sets their extlinux.conf.
     await invoke('flash_image', {
       imagePath,
       device: selectedDisk,
-      overlayPath: flashOverlayPath,
+      overlayPath: isAislpc(selectedConsole) ? '' : flashOverlayPath,
       variant: selectedConsole,
       verify: verifyEnabled,
     });
     $('progress-fill').style.width = '100%';
     $('progress-percent').textContent = '100%';
     $('progress-stage').textContent = '';
-    setFlashStatus(t('done'), 'success');
+    setFlashStatus(isAislpc(selectedConsole)
+      ? t('done_aislpc', { console: consoleName(selectedConsole) })
+      : t('done'), 'success');
   } catch (e) {
     const msg = typeof e === 'string' ? e : String(e);
     if (msg === 'cancelled') {
@@ -799,7 +875,9 @@ function translateError(msg) {
     [/not enough temp space/i, 'error_no_space'],
     [/device not found|was the sd card removed/i, 'error_device_removed'],
     [/not a removable/i, 'error_not_removable'],
+    [/no image found for 'aislpc'/i, 'error_no_image_aislpc'],
     [/no.*image.*found/i, 'error_no_image'],
+    [/err:image_no_board_config/i, 'error_no_board_config'],
     [/^offline:|network|dns|connect|timeout|reqwest::Error|tcp.*reset/i, 'error_network'],
     [/checksum.*fail|sha256 mismatch/i, 'error_checksum_failed'],
     [/verify_failed/i, 'error_verify_failed'],

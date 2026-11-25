@@ -327,7 +327,15 @@ pub(crate) fn stage_boot_config(
     if let Some(bytes) = &dtbo_bytes {
         readback(&mut image.file, "overlays/mipi-panel.dtbo", bytes)?;
     }
-    readback(&mut image.file, "variant", variant.as_bytes())?;
+    if crate::console::writes_variant_file(variant) {
+        readback(&mut image.file, "variant", variant.as_bytes())?;
+    }
+    if let Some(switch) = crate::console::extlinux_switch(variant).filter(|s| s.required) {
+        let want = crate::rawwrite_unix::read_boot_file(
+            &mut image.file, &format!("extlinux/{}", switch.source),
+        )?;
+        readback(&mut image.file, "extlinux/extlinux.conf", &want)?;
+    }
 
     image.revalidate()?;
     Ok(image)
