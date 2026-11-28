@@ -52,6 +52,10 @@ const FSCTL_ALLOW_EXTENDED_DASD_IO: u32 = 0x0009_0083;
 const IOCTL_DISK_UPDATE_PROPERTIES: u32 = 0x0007_0140;
 const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405c;
 const IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D_1080;
+// Mount manager (mountmgr.h): whether Windows mounts new volumes by itself
+// ("mountvol /N" and "/E").
+const IOCTL_MOUNTMGR_QUERY_AUTO_MOUNT: u32 = 0x006D_003C;
+const IOCTL_MOUNTMGR_SET_AUTO_MOUNT: u32 = 0x006D_C040;
 
 // A subset of Win32 error codes we translate into actionable messages.
 const ERROR_ACCESS_DENIED: u32 = 5;
@@ -204,6 +208,59 @@ fn open_handle(path: &str, access: u32, flags: u32) -> Result<OwnedHandle, u32> 
         Err(unsafe { GetLastError() })
     } else {
         Ok(OwnedHandle(h))
+    }
+}
+
+/// Windows' automount, off for the write and the verify and back as it was
+/// afterwards (Rufus does the same). The image's partition table lands on
+/// the card while it is written; with automount on, Windows mounts the new
+/// partitions it describes (volumes nobody locked) and writes to them
+/// (System Volume Information, a FAT's dirty flag), so the card no longer
+/// reads back as the image: "verify_failed" on good cards (issues #15, #16).
+struct AutoMountOff {
+    restore: bool,
+}
+
+impl AutoMountOff {
+    fn new(diag: &mut DiagLog) -> AutoMountOff {
+        let Ok(mgr) = open_handle(r"\\.\MountPointManager", GENERIC_READ | GENERIC_WRITE, 0) else {
+            diag.push_str("automount: mount manager not reachable, left as it is\n");
+            return AutoMountOff { restore: false };
+        };
+        let mut state: u32 = 0;
+        let mut returned: u32 = 0;
+        // SAFETY: mgr is valid; the out buffer is a u32 (MOUNTMGR_AUTO_MOUNT_STATE).
+        let queried = unsafe {
+            DeviceIoControl(mgr.0, IOCTL_MOUNTMGR_QUERY_AUTO_MOUNT, std::ptr::null_mut(), 0,
+                &mut state as *mut u32 as *mut c_void, 4, &mut returned, std::ptr::null_mut()) != 0
+        };
+        if !queried || state == 0 {
+            diag.push_str(if queried { "automount: already off\n" } else { "automount: state unknown, left as it is\n" });
+            return AutoMountOff { restore: false };
+        }
+        let restore = set_automount(&mgr, 0);
+        diag.push_str(if restore { "automount: off for the write\n" } else { "automount: could not turn it off\n" });
+        AutoMountOff { restore }
+    }
+}
+
+impl Drop for AutoMountOff {
+    fn drop(&mut self) {
+        if self.restore {
+            if let Ok(mgr) = open_handle(r"\\.\MountPointManager", GENERIC_READ | GENERIC_WRITE, 0) {
+                set_automount(&mgr, 1);
+            }
+        }
+    }
+}
+
+fn set_automount(mgr: &OwnedHandle, state: u32) -> bool {
+    let mut state = state;
+    let mut returned: u32 = 0;
+    // SAFETY: mgr is valid; the in buffer is a u32 (MOUNTMGR_SET_AUTO_MOUNT).
+    unsafe {
+        DeviceIoControl(mgr.0, IOCTL_MOUNTMGR_SET_AUTO_MOUNT, &mut state as *mut u32 as *mut c_void, 4,
+            std::ptr::null_mut(), 0, &mut returned, std::ptr::null_mut()) != 0
     }
 }
 
@@ -388,6 +445,7 @@ pub fn write_image(
     //     reassign the volume, which invalidates the lock we are holding and
     //     re-arms the write protection. The image write lays down the new
     //     partition table itself, so no pre-clean is needed.
+    let automount = AutoMountOff::new(diag);
     let volume_locks = lock_and_dismount_volumes(disk, diag);
 
     write_progress(progress_path, "STAGE:writing");
@@ -416,6 +474,7 @@ pub fn write_image(
             diag.push_str(&format!(
                 "verify mismatch: wrote {}, read back {}\n", write_hash, read_hash
             ));
+            locate_mismatch(device, &mut image.file, image_size, diag);
             return Err("verify_failed".to_string());
         }
         eprintln!("  verify ok: {}", read_hash);
@@ -425,6 +484,7 @@ pub fn write_image(
     // Release the volume locks so the freshly-written partitions can mount
     // for the config step, then ask Windows to re-read the partition table.
     drop(volume_locks);
+    drop(automount);
     rescan_disk(device);
     diag.push_str("volume locks released, disk rescanned\n");
     write_progress(progress_path, "STAGE:done");
@@ -457,6 +517,11 @@ fn write_pass(
     let buf = aligned.as_mut_slice();
     let mut hasher = Sha256::new();
     let mut written: u64 = 0;
+    // The first chunk (partition table and the start of the boot partition)
+    // goes on the card last; zeros take its place meanwhile, so the card has
+    // no partitions for Windows to find while the rest is written.
+    let mut head = AlignedBuffer::new(CHUNK_BYTES);
+    let mut head_size = 0usize;
 
     loop {
         let to_read = ((image_size - written).min(CHUNK_BYTES as u64)) as usize;
@@ -475,6 +540,11 @@ fn write_pass(
         let aligned_size = ((filled as u64 + SECTOR - 1) & !(SECTOR - 1)) as usize;
         for b in &mut buf[filled..aligned_size] {
             *b = 0;
+        }
+        if written == 0 {
+            head.as_mut_slice()[..aligned_size].copy_from_slice(&buf[..aligned_size]);
+            head_size = aligned_size;
+            buf[..aligned_size].fill(0);
         }
 
         let mut off = 0usize;
@@ -507,8 +577,90 @@ fn write_pass(
 
     // SAFETY: dev is a valid handle.
     unsafe { FlushFileBuffers(dev.0) };
+    if head_size > 0 {
+        // SAFETY: dev is valid; null new-pointer is allowed.
+        if unsafe { SetFilePointerEx(dev.0, 0, std::ptr::null_mut(), FILE_BEGIN) } == 0 {
+            // SAFETY: no intervening calls since SetFilePointerEx failed.
+            return Err(classify_write_error(unsafe { GetLastError() }));
+        }
+        write_all(&dev, &head.as_mut_slice()[..head_size])?;
+        // SAFETY: dev is a valid handle.
+        unsafe { FlushFileBuffers(dev.0) };
+    }
     eprintln!("  wrote {} bytes", written);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn write_all(dev: &OwnedHandle, data: &[u8]) -> Result<(), String> {
+    let mut off = 0usize;
+    while off < data.len() {
+        let mut wrote: u32 = 0;
+        // SAFETY: dev is a valid handle; data[off..] is valid for its length.
+        let ok = unsafe {
+            WriteFile(dev.0, data[off..].as_ptr(), (data.len() - off) as u32, &mut wrote, std::ptr::null_mut()) != 0
+        };
+        if !ok {
+            // SAFETY: no intervening calls since WriteFile failed.
+            return Err(classify_write_error(unsafe { GetLastError() }));
+        }
+        if wrote == 0 {
+            return Err("err:media (write returned 0 bytes — card removed?)".to_string());
+        }
+        off += wrote as usize;
+    }
+    Ok(())
+}
+
+/// After a failed verify, which parts of the card differ from the image, for
+/// the log: a few spots inside a partition point at something writing to the
+/// card (a mounted volume, antivirus); everything from some point on, at a
+/// card smaller than it says (a fake) or one that stopped taking writes.
+fn locate_mismatch(device: &str, image: &mut File, image_size: u64, diag: &mut DiagLog) {
+    use std::io::{Seek, SeekFrom};
+    let Ok(dev) = open_handle(device, GENERIC_READ, FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN) else {
+        return;
+    };
+    if image.seek(SeekFrom::Start(0)).is_err() {
+        return;
+    }
+    // SAFETY: dev is valid; null new-pointer is allowed.
+    unsafe { SetFilePointerEx(dev.0, 0, std::ptr::null_mut(), FILE_BEGIN) };
+    let mut aligned = AlignedBuffer::new(CHUNK_BYTES);
+    let card = aligned.as_mut_slice();
+    let mut want = vec![0u8; CHUNK_BYTES];
+    let (mut at, mut bad, mut zeros) = (0u64, 0u64, 0u64);
+    let mut first = Vec::new();
+    while at < image_size {
+        let n = (image_size - at).min(CHUNK_BYTES as u64) as usize;
+        if image.read_exact(&mut want[..n]).is_err() {
+            break;
+        }
+        let mut got: u32 = 0;
+        // SAFETY: dev is valid; card is valid for CHUNK_BYTES.
+        let ok = unsafe { ReadFile(dev.0, card.as_mut_ptr(), CHUNK_BYTES as u32, &mut got, std::ptr::null_mut()) != 0 };
+        if !ok || (got as usize) < n {
+            diag.push_str(&format!("verify: card read stopped at {} MiB\n", at >> 20));
+            break;
+        }
+        if card[..n] != want[..n] {
+            bad += 1;
+            if card[..n].iter().all(|&b| b == 0) {
+                zeros += 1;
+            }
+            if first.len() < 8 {
+                let off = card[..n].iter().zip(&want[..n]).position(|(a, b)| a != b).unwrap_or(0) as u64;
+                first.push(format!("{} MiB", (at + off) >> 20));
+            }
+        }
+        at += n as u64;
+    }
+    diag.push_str(&format!(
+        "verify: {} of {} chunks of 4 MiB differ ({} read back as zeros); first at {}\n",
+        bad,
+        (image_size + CHUNK_BYTES as u64 - 1) / CHUNK_BYTES as u64,
+        zeros,
+        first.join(", ")
+    ));
 }
 
 fn verify_pass(device: &str, image_size: u64, progress_path: &str) -> Result<String, String> {
